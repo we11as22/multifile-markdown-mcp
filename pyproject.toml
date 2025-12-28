@@ -1,0 +1,90 @@
+[project]
+name = "agent-memory-mcp"
+version = "0.1.0"
+description = "Multi-file markdown MCP server with hybrid search (vector + fulltext + RRF)"
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [
+    {name = "Agent Memory Team"}
+]
+
+dependencies = [
+    # MCP
+    "fastmcp>=2.0.0",
+
+    # Database
+    "asyncpg>=0.29.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+    "pgvector>=0.2.4",
+
+    # Embeddings - OpenAI
+    "openai>=1.12.0",
+
+    # Embeddings - Cohere
+    "cohere>=5.0.0",
+
+    # Embeddings - Ollama & HuggingFace
+    "httpx>=0.26.0",
+    "sentence-transformers>=2.2.0",
+
+    # Embeddings - LiteLLM (universal proxy)
+    "litellm>=1.35.0",
+
+    # Text Processing
+    "langchain-text-splitters>=0.0.1",
+    "markdown>=3.5.0",
+    "pyyaml>=6.0.1",
+
+    # File Watching
+    "watchdog>=4.0.0",
+
+    # Configuration
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.0",
+
+    # Utilities
+    "structlog>=24.1.0",
+    "tenacity>=8.2.3",
+
+    # Date handling
+    "python-dateutil>=2.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "black>=24.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "N", "W"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
