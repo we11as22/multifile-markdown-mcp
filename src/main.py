@@ -15,7 +15,7 @@ from src.mcp.tools import MemoryTools
 from src.search.chunking import MarkdownChunker
 from src.search.hybrid_search import HybridSearchEngine
 from src.storage.file_manager import FileManager
-from src.storage.index_structure import IndexManager
+from src.storage.index_structure import IndexManager, JsonIndexManager
 from src.sync.sync_service import FileSyncService
 
 # Configure structured logging
@@ -66,8 +66,10 @@ async def initialize_server() -> None:
     # Initialize file manager
     file_manager = FileManager(settings.memory_files_path_obj)
 
-    # Initialize index manager
+    # Initialize index managers
     index_manager = IndexManager(settings.main_file_path)
+    json_index_path = settings.memory_files_path_obj / "files_index.json"
+    json_index_manager = JsonIndexManager(json_index_path)
 
     # Initialize chunker
     chunker = MarkdownChunker(
@@ -103,6 +105,7 @@ async def initialize_server() -> None:
         memory_tools = MemoryTools(
             file_manager=file_manager,
             index_manager=index_manager,
+            json_index_manager=json_index_manager,
             repository=repository,
             sync_service=sync_service,
             search_engine=search_engine,
@@ -172,26 +175,35 @@ async def update_tasks(task: str, action: str = "add") -> dict:
 
 
 @mcp.tool()
-async def search_memories(
+async def search(
     query: str,
     search_mode: str = "hybrid",
     limit: int = 10,
+    file_path: str | None = None,
     category_filter: str | None = None,
     tag_filter: list[str] | None = None,
 ) -> dict:
-    """Search across all memory files"""
-    response = await memory_tools.search_memories(query, search_mode, limit, category_filter, tag_filter)
-    return response.model_dump()
+    """
+    Search across memory files with flexible filtering options.
 
+    This unified search method can search:
+    - Across all files (default)
+    - Within a specific file (use file_path parameter)
+    - Filtered by category (use category_filter parameter)
+    - Filtered by tags (use tag_filter parameter - files must have ALL specified tags)
 
-@mcp.tool()
-async def search_within_file(
-    file_path: str,
-    query: str,
-    search_mode: str = "hybrid",
-) -> dict:
-    """Search within a specific file"""
-    response = await memory_tools.search_within_file(file_path, query, search_mode)
+    Args:
+        query: Search query text
+        search_mode: Search algorithm (hybrid/vector/fulltext, default: hybrid)
+        limit: Maximum number of results (default: 10, max: 100)
+        file_path: Optional path to search within a specific file only
+        category_filter: Optional category to filter by
+        tag_filter: Optional list of tags - files must have ALL specified tags
+
+    Returns:
+        Search results with file_path, content, score, etc.
+    """
+    response = await memory_tools.search(query, search_mode, limit, file_path, category_filter, tag_filter)
     return response.model_dump()
 
 
@@ -202,37 +214,28 @@ async def list_files(category: str | None = None) -> dict:
 
 
 @mcp.tool()
-async def edit_section(
+async def edit_file(
     file_path: str,
-    section_header: str,
-    new_content: str,
-    mode: str = "replace"
+    edit_type: str,
+    **kwargs: dict
 ) -> dict:
-    """Edit a specific section in a file by header"""
-    return await memory_tools.edit_section(file_path, section_header, new_content, mode)
+    """
+    Universal file editing method supporting multiple edit operations.
 
+    Supports three edit types:
+    - "section": Edit a specific section by header (requires: section_header, new_content, mode)
+    - "find_replace": Find and replace text/regex (requires: find, replace, optional: regex, max_replacements)
+    - "insert": Insert content at position (requires: content, optional: position, marker)
 
-@mcp.tool()
-async def find_replace(
-    file_path: str,
-    find: str,
-    replace: str,
-    regex: bool = False,
-    max_replacements: int = -1
-) -> dict:
-    """Find and replace text in a file"""
-    return await memory_tools.find_replace(file_path, find, replace, regex, max_replacements)
+    Args:
+        file_path: Path to the file to edit
+        edit_type: Type of edit (section/find_replace/insert)
+        **kwargs: Additional parameters depending on edit_type
 
-
-@mcp.tool()
-async def insert_content(
-    file_path: str,
-    content: str,
-    position: str = "end",
-    marker: str | None = None
-) -> dict:
-    """Insert content at specific position in file"""
-    return await memory_tools.insert_content(file_path, content, position, marker)
+    Returns:
+        Operation results
+    """
+    return await memory_tools.edit_file(file_path, edit_type, **kwargs)
 
 
 @mcp.tool()
@@ -272,6 +275,36 @@ async def get_tags(file_path: str) -> dict:
 async def batch_create_files(files: list[dict]) -> dict:
     """Create multiple memory files at once"""
     return await memory_tools.batch_create_files(files)
+
+
+@mcp.tool()
+async def batch_update_files(updates: list[dict]) -> dict:
+    """Update multiple memory files at once"""
+    return await memory_tools.batch_update_files(updates)
+
+
+@mcp.tool()
+async def batch_delete_files(file_paths: list[str]) -> dict:
+    """Delete multiple memory files at once"""
+    return await memory_tools.batch_delete_files(file_paths)
+
+
+@mcp.tool()
+async def batch_search(queries: list[dict]) -> dict:
+    """Perform multiple searches at once"""
+    return await memory_tools.batch_search(queries)
+
+
+@mcp.tool()
+async def initialize_memory() -> dict:
+    """Initialize memory to base state (main.md + files_index.json)"""
+    return await memory_tools.initialize_memory()
+
+
+@mcp.tool()
+async def reset_memory() -> dict:
+    """Reset memory to base state - deletes all files except main.md and files_index.json"""
+    return await memory_tools.reset_memory()
 
 
 @mcp.tool()
@@ -322,43 +355,30 @@ async def get_memory_file(file_path: str) -> str:
 # Register MCP Prompts
 @mcp.prompt()
 async def remember_conversation(topic: str, key_points: str) -> list[dict]:
-    """Generate a prompt to save conversation memory"""
-    return [
-        {
-            "role": "user",
-            "content": f"""Please create a memory file for this conversation about: {topic}
-
-Key points to remember:
-{key_points}
-
-Create a well-structured markdown file with:
-1. A clear title
-2. Date and context
-3. Main discussion points
-4. Important decisions or conclusions
-5. Follow-up actions if any
-
-Use the create_memory_file tool with category='conversation'."""
-        }
-    ]
+    """Generate a prompt to save conversation memory with detailed instructions"""
+    from src.mcp.prompts import remember_conversation_prompt
+    return remember_conversation_prompt(topic, key_points)
 
 
 @mcp.prompt()
 async def recall_context(topic: str) -> list[dict]:
-    """Generate a prompt to recall relevant context"""
-    return [
-        {
-            "role": "user",
-            "content": f"""Search my memory for information about: {topic}
+    """Generate a prompt to recall relevant context with search instructions"""
+    from src.mcp.prompts import recall_context_prompt
+    return recall_context_prompt(topic)
 
-Use the search_memories tool with:
-- query: "{topic}"
-- search_mode: "hybrid"
-- limit: 10
 
-Then summarize the relevant findings."""
-        }
-    ]
+@mcp.prompt()
+async def memory_usage_guide() -> str:
+    """Get comprehensive guide on using the memory system"""
+    from src.mcp.prompts import get_memory_usage_prompt
+    return get_memory_usage_prompt()
+
+
+@mcp.prompt()
+async def active_memory_usage() -> str:
+    """Get prompt encouraging active memory usage"""
+    from src.mcp.prompts import active_memory_usage_prompt
+    return active_memory_usage_prompt()
 
 
 async def main() -> None:
@@ -382,5 +402,10 @@ async def main() -> None:
         await shutdown_server()
 
 
-if __name__ == "__main__":
+def cli_main() -> None:
+    """CLI entry point for pip installation"""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    cli_main()

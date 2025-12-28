@@ -1,4 +1,6 @@
 """Initialize memory file structure"""
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -71,6 +73,20 @@ This section maintains an index of all specialized memory files with description
 """
         main_file.write_text(main_content, encoding='utf-8')
         print(f"Created {main_file}")
+
+    # Create files_index.json if it doesn't exist
+    json_index_file = base_path / "files_index.json"
+    if not json_index_file.exists():
+        json_content = {
+            "version": "1.0",
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "files": []
+        }
+        json_index_file.write_text(
+            json.dumps(json_content, indent=2, ensure_ascii=False),
+            encoding='utf-8'
+        )
+        print(f"Created {json_index_file}")
 
     print(f"Memory structure initialized at {base_path}")
     print(f"Subdirectories: {', '.join(subdirs)}")

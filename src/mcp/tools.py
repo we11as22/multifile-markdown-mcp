@@ -8,7 +8,7 @@ from src.models.memory import MemoryCategory
 from src.models.search import SearchMode, SearchRequest, SearchResponse
 from src.search.hybrid_search import HybridSearchEngine
 from src.storage.file_manager import FileManager
-from src.storage.index_structure import IndexManager
+from src.storage.index_structure import IndexManager, JsonIndexManager
 from src.sync.sync_service import FileSyncService
 from src.utils.file_editor import MarkdownEditor
 
@@ -22,17 +22,19 @@ class MemoryTools:
         self,
         file_manager: FileManager,
         index_manager: IndexManager,
-        repository: MemoryRepository,
-        sync_service: FileSyncService,
-        search_engine: HybridSearchEngine,
+        json_index_manager: JsonIndexManager,
+        repository: Optional[MemoryRepository],
+        sync_service: Optional[FileSyncService],
+        search_engine: Optional[HybridSearchEngine],
     ) -> None:
         """Initialize memory tools"""
         self.file_manager = file_manager
         self.index_manager = index_manager
+        self.json_index_manager = json_index_manager
         self.repository = repository
         self.sync_service = sync_service
         self.search_engine = search_engine
-        logger.info("memory_tools_initialized")
+        logger.info("memory_tools_initialized", has_db=repository is not None)
 
     async def create_memory_file(
         self,
@@ -62,14 +64,35 @@ class MemoryTools:
         # Write file
         self.file_manager.write_file(file_path, content)
 
-        # Sync to database
-        await self.sync_service.sync_file(file_path)
+        # Sync to database if available
+        if self.sync_service:
+            await self.sync_service.sync_file(file_path)
 
-        # Update index
+        # Get file record from database for complete metadata
+        file_record = None
+        if self.repository:
+            file_record = await self.repository.get_file_by_path(file_path)
+
+        # Update markdown index
         self.index_manager.update_file_index(
             file_path=file_path,
             description=title,
             category=f"{category}s"
+        )
+
+        # Update JSON index (file_record should always exist if database is connected)
+        if not file_record:
+            raise RuntimeError("File record not found after sync. Database connection may be invalid.")
+        self.json_index_manager.add_or_update_file(
+            file_path=file_path,
+            title=file_record.title,
+            category=file_record.category.value,
+            description=title,
+            tags=file_record.tags,
+            metadata=file_record.metadata,
+            word_count=file_record.word_count,
+            created_at=file_record.created_at,
+            updated_at=file_record.updated_at,
         )
 
         logger.info("memory_file_created", file_path=file_path, title=title)
@@ -110,8 +133,30 @@ class MemoryTools:
             existing = self.file_manager.read_file(file_path)
             self.file_manager.write_file(file_path, content + "\n\n" + existing)
 
-        # Sync to database
+        # Sync to database (required)
+        if not self.sync_service:
+            raise RuntimeError("Sync service not available. Database connection is required.")
         await self.sync_service.sync_file(file_path, force=True)
+
+        # Get updated file record
+        if not self.repository:
+            raise RuntimeError("Repository not available. Database connection is required.")
+        file_record = await self.repository.get_file_by_path(file_path)
+
+        # Update JSON index (file_record should always exist if database is connected)
+        if not file_record:
+            raise RuntimeError("File record not found after sync. Database connection may be invalid.")
+        self.json_index_manager.add_or_update_file(
+            file_path=file_path,
+            title=file_record.title,
+            category=file_record.category.value,
+            description=file_record.title,
+            tags=file_record.tags,
+            metadata=file_record.metadata,
+            word_count=file_record.word_count,
+            created_at=file_record.created_at,
+            updated_at=file_record.updated_at,
+        )
 
         logger.info("memory_file_updated", file_path=file_path, mode=update_mode)
 
@@ -122,16 +167,22 @@ class MemoryTools:
 
     async def delete_memory_file(self, file_path: str) -> dict[str, str]:
         """Delete a memory file"""
-        # Get file ID first
-        file_record = await self.repository.get_file_by_path(file_path)
-        if not file_record:
-            raise FileNotFoundError(f"File not found in database: {file_path}")
+        # Check if file exists in filesystem
+        if not self.file_manager.file_exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Delete from database (cascades to chunks)
-        await self.repository.delete_file(file_record.id)
+        # Delete from database (required)
+        if not self.repository:
+            raise RuntimeError("Repository not available. Database connection is required.")
+        file_record = await self.repository.get_file_by_path(file_path)
+        if file_record:
+            await self.repository.delete_file(file_record.id)
 
         # Delete file from filesystem
         self.file_manager.delete_file(file_path)
+
+        # Remove from JSON index
+        self.json_index_manager.remove_file(file_path)
 
         logger.info("memory_file_deleted", file_path=file_path)
 
@@ -208,26 +259,54 @@ class MemoryTools:
 
         return {"message": f"Task added: {task}"}
 
-    async def search_memories(
+    async def search(
         self,
         query: str,
         search_mode: Literal["hybrid", "vector", "fulltext"] = "hybrid",
         limit: int = 10,
+        file_path: Optional[str] = None,
         category_filter: Optional[str] = None,
         tag_filter: Optional[list[str]] = None,
     ) -> SearchResponse:
         """
-        Search across all memory files.
+        Search across memory files with flexible filtering options.
+
+        This unified search method can search:
+        - Across all files (default)
+        - Within a specific file (use file_path parameter)
+        - Filtered by category (use category_filter parameter)
+        - Filtered by tags (use tag_filter parameter - files must have ALL specified tags)
 
         Args:
-            query: Search query
-            search_mode: Search algorithm (hybrid, vector, fulltext)
-            limit: Maximum results
-            category_filter: Optional category filter
-            tag_filter: Optional tag filter (files must have ALL specified tags)
+            query: Search query text
+            search_mode: Search algorithm to use:
+                - "hybrid": Combines vector (semantic) and fulltext (keyword) search with RRF ranking (recommended)
+                - "vector": Semantic similarity search using embeddings
+                - "fulltext": Keyword-based search using PostgreSQL fulltext search
+            limit: Maximum number of results to return (default: 10, max: 100)
+            file_path: Optional path to search within a specific file only (e.g., "projects/my_project.md")
+            category_filter: Optional category to filter by (project, concept, conversation, preference, other)
+            tag_filter: Optional list of tags - files must have ALL specified tags to match
 
         Returns:
-            Search response with results
+            SearchResponse with results containing:
+            - query: The search query used
+            - results: List of search results with file_path, content, score, etc.
+            - total_results: Number of results found
+            - search_mode: The search mode used
+
+        Examples:
+            # Search across all files
+            results = await search("machine learning", search_mode="hybrid", limit=20)
+
+            # Search within a specific file
+            results = await search("neural networks", file_path="concepts/ml_concepts.md")
+
+            # Search with category filter
+            results = await search("project status", category_filter="project")
+
+            # Search with tag filter
+            results = await search("important notes", tag_filter=["important", "active"])
         """
         mode_map = {
             "hybrid": SearchMode.HYBRID,
@@ -236,55 +315,31 @@ class MemoryTools:
         }
 
         search_mode_enum = mode_map[search_mode]
+
+        # If file_path is specified, use it as file_filter and increase limit
+        file_filter = file_path
+        if file_path:
+            limit = min(limit, 100)  # Cap at 100 for file-specific searches
+
+        if not self.search_engine:
+            raise RuntimeError(
+                "Search engine not available. Database connection is required for search functionality."
+            )
 
         results = await self.search_engine.search(
             query=query,
             search_mode=search_mode_enum,
             limit=limit,
+            file_filter=file_filter,
             category_filter=category_filter,
             tag_filter=tag_filter,
         )
 
         logger.info(
-            "memories_searched",
+            "memory_searched",
             query=query,
             mode=search_mode,
-            results_count=len(results)
-        )
-
-        return SearchResponse(
-            query=query,
-            results=results,
-            total_results=len(results),
-            search_mode=search_mode_enum,
-        )
-
-    async def search_within_file(
-        self,
-        file_path: str,
-        query: str,
-        search_mode: Literal["hybrid", "vector", "fulltext"] = "hybrid",
-    ) -> SearchResponse:
-        """Search within a specific file"""
-        mode_map = {
-            "hybrid": SearchMode.HYBRID,
-            "vector": SearchMode.VECTOR,
-            "fulltext": SearchMode.FULLTEXT,
-        }
-
-        search_mode_enum = mode_map[search_mode]
-
-        results = await self.search_engine.search(
-            query=query,
-            search_mode=search_mode_enum,
-            limit=100,
-            file_filter=file_path,
-        )
-
-        logger.info(
-            "file_searched",
             file_path=file_path,
-            query=query,
             results_count=len(results)
         )
 
@@ -308,6 +363,10 @@ class MemoryTools:
         category: Optional[Literal["project", "concept", "conversation", "preference", "other"]] = None,
     ) -> dict[str, Any]:
         """List all memory files, optionally filtered by category"""
+        if not self.repository:
+            raise RuntimeError("Repository not available. Database connection is required.")
+
+        # Use database
         if category:
             category_enum = MemoryCategory(category)
             files = await self.repository.get_all_files(category=category_enum)
@@ -333,116 +392,159 @@ class MemoryTools:
     # Advanced Editing Operations
     # =============================
 
-    async def edit_section(
+    async def edit_file(
         self,
         file_path: str,
-        section_header: str,
-        new_content: str,
-        mode: Literal["replace", "append", "prepend"] = "replace",
-    ) -> dict[str, str]:
-        """
-        Edit a specific section in a file by header.
-
-        Args:
-            file_path: Path to file
-            section_header: Section header (e.g., "## Goals" or "Goals")
-            new_content: New content for section
-            mode: How to update (replace/append/prepend)
-
-        Returns:
-            Success message
-        """
-        if not self.file_manager.file_exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        content = self.file_manager.read_file(file_path)
-        updated_content = MarkdownEditor.edit_section(content, section_header, new_content, mode)
-        self.file_manager.write_file(file_path, updated_content)
-
-        # Sync to database
-        await self.sync_service.sync_file(file_path, force=True)
-
-        return {
-            "file_path": file_path,
-            "section": section_header,
-            "mode": mode,
-            "message": f"Section '{section_header}' updated successfully"
-        }
-
-    async def find_replace(
-        self,
-        file_path: str,
-        find: str,
-        replace: str,
-        regex: bool = False,
-        max_replacements: int = -1,
+        edit_type: Literal["section", "find_replace", "insert"],
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """
-        Find and replace text in a file.
+        Universal file editing method supporting multiple edit operations.
+
+        This method unifies all file editing operations into a single interface:
+        - Section editing (edit_section)
+        - Find and replace (find_replace)
+        - Content insertion (insert_content)
 
         Args:
-            file_path: Path to file
-            find: Text or regex pattern to find
-            replace: Replacement text
-            regex: Whether find is regex pattern
-            max_replacements: Max number of replacements (-1 for all)
+            file_path: Path to the file to edit
+            edit_type: Type of edit operation:
+                - "section": Edit a specific section by header
+                - "find_replace": Find and replace text/regex patterns
+                - "insert": Insert content at specific position
+            **kwargs: Additional parameters depending on edit_type:
+                For "section":
+                    - section_header: Section header (e.g., "## Goals" or "Goals")
+                    - new_content: New content for section
+                    - mode: How to update (replace/append/prepend, default: "replace")
+                For "find_replace":
+                    - find: Text or regex pattern to find
+                    - replace: Replacement text
+                    - regex: Whether find is regex pattern (default: False)
+                    - max_replacements: Max number of replacements (-1 for all, default: -1)
+                For "insert":
+                    - content: Content to insert
+                    - position: Where to insert (start/end/after_marker, default: "end")
+                    - marker: Marker text to insert after (required for after_marker)
 
         Returns:
-            Result with number of replacements made
+            Dictionary with operation results
+
+        Examples:
+            # Edit a section
+            await edit_file(
+                "projects/my_project.md",
+                edit_type="section",
+                section_header="## Status",
+                new_content="In progress",
+                mode="replace"
+            )
+
+            # Find and replace
+            await edit_file(
+                "notes.md",
+                edit_type="find_replace",
+                find="old text",
+                replace="new text",
+                regex=False
+            )
+
+            # Insert content
+            await edit_file(
+                "notes.md",
+                edit_type="insert",
+                content="New note",
+                position="end"
+            )
         """
         if not self.file_manager.file_exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
         content = self.file_manager.read_file(file_path)
-        updated_content, num_replacements = MarkdownEditor.find_and_replace(
-            content, find, replace, regex, max_replacements
-        )
+        updated_content = content
+        result_info: dict[str, Any] = {"file_path": file_path}
 
-        if num_replacements > 0:
-            self.file_manager.write_file(file_path, updated_content)
-            await self.sync_service.sync_file(file_path, force=True)
+        if edit_type == "section":
+            section_header = kwargs.get("section_header")
+            new_content = kwargs.get("new_content")
+            mode = kwargs.get("mode", "replace")
 
-        return {
-            "file_path": file_path,
-            "replacements_made": num_replacements,
-            "message": f"Made {num_replacements} replacement(s)"
-        }
+            if not section_header or new_content is None:
+                raise ValueError("section_header and new_content are required for section edit")
 
-    async def insert_content(
-        self,
-        file_path: str,
-        content: str,
-        position: Literal["start", "end", "after_marker"] = "end",
-        marker: Optional[str] = None,
-    ) -> dict[str, str]:
-        """
-        Insert content at specific position in file.
+            updated_content = MarkdownEditor.edit_section(content, section_header, new_content, mode)
+            result_info.update({
+                "section": section_header,
+                "mode": mode,
+                "message": f"Section '{section_header}' updated successfully"
+            })
 
-        Args:
-            file_path: Path to file
-            content: Content to insert
-            position: Where to insert (start/end/after_marker)
-            marker: Marker text to insert after (required for after_marker)
+        elif edit_type == "find_replace":
+            find = kwargs.get("find")
+            replace = kwargs.get("replace")
+            regex = kwargs.get("regex", False)
+            max_replacements = kwargs.get("max_replacements", -1)
 
-        Returns:
-            Success message
-        """
-        if not self.file_manager.file_exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
+            if not find or replace is None:
+                raise ValueError("find and replace are required for find_replace edit")
 
-        existing_content = self.file_manager.read_file(file_path)
-        updated_content = MarkdownEditor.insert_at_position(
-            existing_content, content, position, marker
-        )
+            updated_content, num_replacements = MarkdownEditor.find_and_replace(
+                content, find, replace, regex, max_replacements
+            )
+            result_info.update({
+                "replacements_made": num_replacements,
+                "message": f"Made {num_replacements} replacement(s)"
+            })
+
+        elif edit_type == "insert":
+            insert_content = kwargs.get("content")
+            position = kwargs.get("position", "end")
+            marker = kwargs.get("marker")
+
+            if not insert_content:
+                raise ValueError("content is required for insert edit")
+
+            updated_content = MarkdownEditor.insert_at_position(
+                content, insert_content, position, marker
+            )
+            result_info.update({
+                "position": position,
+                "message": f"Content inserted at {position}"
+            })
+
+        else:
+            raise ValueError(f"Unknown edit_type: {edit_type}")
+
+        # Write updated content
         self.file_manager.write_file(file_path, updated_content)
 
+        # Sync to database (required)
+        if not self.sync_service:
+            raise RuntimeError("Sync service not available. Database connection is required.")
         await self.sync_service.sync_file(file_path, force=True)
 
-        return {
-            "file_path": file_path,
-            "position": position,
-            "message": f"Content inserted at {position}"
-        }
+        # Update JSON index
+        if not self.repository:
+            raise RuntimeError("Repository not available. Database connection is required.")
+        file_record = await self.repository.get_file_by_path(file_path)
+
+        if not file_record:
+            raise RuntimeError("File record not found after sync. Database connection may be invalid.")
+        self.json_index_manager.add_or_update_file(
+            file_path=file_path,
+            title=file_record.title,
+            category=file_record.category.value,
+            description=file_record.title,
+            tags=file_record.tags,
+            metadata=file_record.metadata,
+            word_count=file_record.word_count,
+            created_at=file_record.created_at,
+            updated_at=file_record.updated_at,
+        )
+
+        logger.info("file_edited", file_path=file_path, edit_type=edit_type)
+
+        return result_info
 
     async def extract_section(
         self,
@@ -513,17 +615,22 @@ class MemoryTools:
         Returns:
             Updated tags list
         """
-        # Get current file record
+        if not self.file_manager.file_exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Get current tags from database
+        if not self.repository:
+            raise RuntimeError("Repository not available. Database connection is required.")
         file_record = await self.repository.get_file_by_path(file_path)
         if not file_record:
             raise FileNotFoundError(f"File not found in database: {file_path}")
 
         # Merge tags (avoid duplicates)
-        current_tags = set(file_record.tags)
-        new_tags = current_tags.union(set(tags))
+        current_tags = file_record.tags
+        new_tags = set(current_tags).union(set(tags))
         updated_tags = list(new_tags)
 
-        # Update database directly
+        # Update database
         from sqlalchemy import update
         from src.database.schema import MemoryFileModel
 
@@ -533,6 +640,19 @@ class MemoryTools:
             .values(tags=updated_tags)
         )
         await self.repository.session.commit()
+
+        # Update JSON index
+        self.json_index_manager.add_or_update_file(
+            file_path=file_path,
+            title=file_record.title,
+            category=file_record.category.value,
+            description=file_record.title,
+            tags=updated_tags,
+            metadata=file_record.metadata,
+            word_count=file_record.word_count,
+            created_at=file_record.created_at,
+            updated_at=file_record.updated_at,
+        )
 
         logger.info("tags_added", file_path=file_path, tags=tags)
 
@@ -557,16 +677,21 @@ class MemoryTools:
         Returns:
             Updated tags list
         """
-        # Get current file record
+        if not self.file_manager.file_exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Get current tags from database
+        if not self.repository:
+            raise RuntimeError("Repository not available. Database connection is required.")
         file_record = await self.repository.get_file_by_path(file_path)
         if not file_record:
             raise FileNotFoundError(f"File not found in database: {file_path}")
 
         # Remove tags
-        current_tags = set(file_record.tags)
-        updated_tags = list(current_tags.difference(set(tags)))
+        current_tags = file_record.tags
+        updated_tags = list(set(current_tags).difference(set(tags)))
 
-        # Update database directly
+        # Update database
         from sqlalchemy import update
         from src.database.schema import MemoryFileModel
 
@@ -576,6 +701,19 @@ class MemoryTools:
             .values(tags=updated_tags)
         )
         await self.repository.session.commit()
+
+        # Update JSON index
+        self.json_index_manager.add_or_update_file(
+            file_path=file_path,
+            title=file_record.title,
+            category=file_record.category.value,
+            description=file_record.title,
+            tags=updated_tags,
+            metadata=file_record.metadata,
+            word_count=file_record.word_count,
+            created_at=file_record.created_at,
+            updated_at=file_record.updated_at,
+        )
 
         logger.info("tags_removed", file_path=file_path, tags=tags)
 
@@ -595,6 +733,11 @@ class MemoryTools:
         Returns:
             Tags list
         """
+        if not self.file_manager.file_exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        if not self.repository:
+            raise RuntimeError("Repository not available. Database connection is required.")
         file_record = await self.repository.get_file_by_path(file_path)
         if not file_record:
             raise FileNotFoundError(f"File not found in database: {file_path}")
@@ -648,6 +791,137 @@ class MemoryTools:
             "errors": errors,
             "total": len(files),
             "success_count": len(created),
+            "error_count": len(errors)
+        }
+
+    async def batch_update_files(
+        self,
+        updates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """
+        Update multiple memory files at once.
+
+        Args:
+            updates: List of update definitions with keys:
+                - file_path: Path to file (required)
+                - content: New content (required)
+                - update_mode: How to update (replace/append/prepend, default: "replace")
+
+        Returns:
+            Results with updated files and any errors
+        """
+        updated = []
+        errors = []
+
+        for update_def in updates:
+            try:
+                result = await self.update_memory_file(
+                    file_path=update_def["file_path"],
+                    content=update_def["content"],
+                    update_mode=update_def.get("update_mode", "replace"),
+                )
+                updated.append(result)
+            except Exception as e:
+                errors.append({
+                    "file_path": update_def.get("file_path", "unknown"),
+                    "error": str(e)
+                })
+
+        logger.info("batch_update_completed", updated=len(updated), errors=len(errors))
+
+        return {
+            "updated": updated,
+            "errors": errors,
+            "total": len(updates),
+            "success_count": len(updated),
+            "error_count": len(errors)
+        }
+
+    async def batch_delete_files(
+        self,
+        file_paths: list[str],
+    ) -> dict[str, Any]:
+        """
+        Delete multiple memory files at once.
+
+        Args:
+            file_paths: List of file paths to delete
+
+        Returns:
+            Results with deleted files and any errors
+        """
+        deleted = []
+        errors = []
+
+        for file_path in file_paths:
+            try:
+                result = await self.delete_memory_file(file_path)
+                deleted.append(result)
+            except Exception as e:
+                errors.append({
+                    "file_path": file_path,
+                    "error": str(e)
+                })
+
+        logger.info("batch_delete_completed", deleted=len(deleted), errors=len(errors))
+
+        return {
+            "deleted": deleted,
+            "errors": errors,
+            "total": len(file_paths),
+            "success_count": len(deleted),
+            "error_count": len(errors)
+        }
+
+    async def batch_search(
+        self,
+        queries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """
+        Perform multiple searches at once.
+
+        Args:
+            queries: List of search query definitions with keys:
+                - query: Search query text (required)
+                - search_mode: Search mode (hybrid/vector/fulltext, default: "hybrid")
+                - limit: Maximum results (default: 10)
+                - file_path: Optional file path filter
+                - category_filter: Optional category filter
+                - tag_filter: Optional tag filter list
+
+        Returns:
+            Results with search results for each query
+        """
+        results = []
+        errors = []
+
+        for query_def in queries:
+            try:
+                result = await self.search(
+                    query=query_def["query"],
+                    search_mode=query_def.get("search_mode", "hybrid"),
+                    limit=query_def.get("limit", 10),
+                    file_path=query_def.get("file_path"),
+                    category_filter=query_def.get("category_filter"),
+                    tag_filter=query_def.get("tag_filter"),
+                )
+                results.append({
+                    "query": query_def["query"],
+                    "result": result.model_dump() if hasattr(result, "model_dump") else result,
+                })
+            except Exception as e:
+                errors.append({
+                    "query": query_def.get("query", "unknown"),
+                    "error": str(e)
+                })
+
+        logger.info("batch_search_completed", results_count=len(results), errors=len(errors))
+
+        return {
+            "results": results,
+            "errors": errors,
+            "total": len(queries),
+            "success_count": len(results),
             "error_count": len(errors)
         }
 
@@ -899,4 +1173,117 @@ class MemoryTools:
             "new_file_path": result["file_path"],
             "new_title": new_title,
             "message": f"File copied successfully from {source_file_path} to {result['file_path']}"
+        }
+
+    # =============================
+    # Initialization and Reset
+    # =============================
+
+    async def initialize_memory(self) -> dict[str, Any]:
+        """
+        Initialize memory to base state (main.md + files_index.json).
+        Creates the base structure if it doesn't exist.
+
+        Returns:
+            Status message with initialization details
+        """
+        from scripts.init_memory_structure import init_memory_structure
+
+        # Initialize file structure
+        init_memory_structure(self.file_manager.memory_files_path)
+
+        # Ensure main.md exists
+        if not self.file_manager.file_exists("main.md"):
+            raise RuntimeError("Failed to create main.md during initialization")
+
+        # Ensure files_index.json exists
+        if not self.json_index_manager.json_index_path.exists():
+            # Create empty index
+            self.json_index_manager.write_index({
+                "version": "1.0",
+                "last_updated": "",
+                "files": []
+            })
+
+        # Sync main.md to database (required)
+        if not self.sync_service:
+            raise RuntimeError("Sync service not available. Database connection is required.")
+        try:
+            await self.sync_service.sync_file("main.md", force=True)
+        except Exception as e:
+            logger.warning("failed_to_sync_main_to_db", error=str(e))
+
+        logger.info("memory_initialized", path=str(self.file_manager.memory_files_path))
+
+        return {
+            "message": "Memory initialized successfully",
+            "memory_path": str(self.file_manager.memory_files_path),
+            "main_file": "main.md",
+            "index_file": "files_index.json"
+        }
+
+    async def reset_memory(self) -> dict[str, Any]:
+        """
+        Reset memory to base state.
+        Deletes all files except main.md and files_index.json, clears database.
+
+        Returns:
+            Status message with reset details
+        """
+        # Get all files
+        all_files = self.file_manager.list_all_files()
+
+        # Filter out main.md and files_index.json
+        files_to_delete = [
+            f for f in all_files
+            if f != "main.md" and not f.endswith("files_index.json")
+        ]
+
+        deleted_count = 0
+        errors = []
+
+        # Delete files
+        if not self.repository:
+            raise RuntimeError("Repository not available. Database connection is required.")
+
+        for file_path in files_to_delete:
+            try:
+                # Delete from database
+                file_record = await self.repository.get_file_by_path(file_path)
+                if file_record:
+                    await self.repository.delete_file(file_record.id)
+
+                # Delete from filesystem
+                self.file_manager.delete_file(file_path)
+
+                # Remove from JSON index
+                self.json_index_manager.remove_file(file_path)
+
+                deleted_count += 1
+            except Exception as e:
+                errors.append({"file_path": file_path, "error": str(e)})
+                logger.warning("failed_to_delete_file", file_path=file_path, error=str(e))
+
+        # Clear JSON index (keep structure)
+        self.json_index_manager.clear_all_files()
+
+        # Reset main.md to base state
+        from scripts.init_memory_structure import init_memory_structure
+        init_memory_structure(self.file_manager.memory_files_path)
+
+        # Sync main.md (required)
+        if not self.sync_service:
+            raise RuntimeError("Sync service not available. Database connection is required.")
+        try:
+            await self.sync_service.sync_file("main.md", force=True)
+        except Exception as e:
+            logger.warning("failed_to_sync_main_after_reset", error=str(e))
+
+        logger.info("memory_reset", deleted_count=deleted_count, errors=len(errors))
+
+        return {
+            "message": "Memory reset to base state",
+            "deleted_files": deleted_count,
+            "errors": errors,
+            "remaining_files": ["main.md", "files_index.json"]
         }

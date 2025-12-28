@@ -1,12 +1,18 @@
 [project]
 name = "agent-memory-mcp"
 version = "0.1.0"
-description = "Multi-file markdown MCP server with hybrid search (vector + fulltext + RRF)"
+description = "Multi-file markdown MCP server with hybrid search (vector + fulltext + RRF) - Can be used as MCP server or Python library"
 requires-python = ">=3.11"
 readme = "README.md"
 authors = [
     {name = "Agent Memory Team"}
 ]
+
+[project.scripts]
+agent-memory = "src.main:cli_main"
+
+[project.entry-points."agent_memory_mcp"]
+library = "src.library:MemoryLibrary"
 
 dependencies = [
     # MCP
