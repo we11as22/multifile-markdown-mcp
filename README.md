@@ -2,6 +2,21 @@
 
 Multi-file markdown MCP server with hybrid search (vector + fulltext + RRF) for agent memory management. Can be used as MCP server or Python library.
 
+## 🚀 Возможности
+
+**9 универсальных MCP инструментов** - все операции работают с массивами, без дублирования:
+- 📁 **files** - Управление файлами (create, read, update, delete, move, copy, rename, list)
+- 🔍 **search** - Поиск с гибридным алгоритмом (vector + fulltext + RRF)
+- ✏️ **edit** - Редактирование (секции, поиск/замена, вставка)
+- 🏷️ **tags** - Управление тегами (add, remove, get)
+- 🎯 **main** - Операции с main.md (append, goal, task, plan)
+- 🔧 **memory** - Управление памятью (initialize, reset)
+- 📄 **extract** - Извлечение секций из файлов
+- 📋 **list** - Списки файлов и секций
+- 💡 **help** - Помощь, рекомендации, гайды и примеры использования
+
+**Все инструменты всегда работают с массивами** - нет разделения на batch и не-batch версии!
+
 ## Features
 
 - **Persistent Memory**: Store agent memories in human-readable markdown files
@@ -227,324 +242,282 @@ RRF_K=60                    # RRF k parameter (higher = less ranking difference)
 
 ## MCP Tools
 
-### Memory Management
+Сервис предоставляет **9 универсальных MCP инструментов**. Все операции работают с массивами - нет дублирования между batch и не-batch версиями.
 
-#### `create_memory_file`
-Create a new memory file.
+### 📁 1. files - Управление файлами
+
+**Всегда работает с массивом операций.** Поддерживает операции: `create`, `read`, `update`, `delete`, `move`, `copy`, `rename`, `list`.
+
 ```python
-{
-  "title": "Project Alpha",
-  "category": "project",  # project, concept, conversation, preference, other
-  "content": "# Project Alpha\n\n...",
-  "tags": ["important"],  # optional
-  "metadata": {}  # optional
-}
+# Создание нескольких файлов
+files(operation="create", items=[
+    {"title": "Project 1", "category": "project", "content": "# Project 1", "tags": ["important"]},
+    {"title": "Concept 1", "category": "concept", "content": "# Concept 1"},
+])
+
+# Чтение нескольких файлов
+files(operation="read", items=[
+    {"file_path": "projects/project_1.md"},
+    {"file_path": "concepts/concept_1.md"},
+])
+
+# Обновление файлов
+files(operation="update", items=[
+    {"file_path": "projects/project_1.md", "content": "# Updated", "update_mode": "replace"},
+    {"file_path": "concepts/concept_1.md", "content": "# More content", "update_mode": "append"},
+])
+
+# Удаление файлов
+files(operation="delete", items=[
+    {"file_path": "projects/old_project.md"},
+])
+
+# Перемещение файлов
+files(operation="move", items=[
+    {"file_path": "projects/project.md", "new_category": "concept"},
+])
+
+# Копирование файлов
+files(operation="copy", items=[
+    {"source_file_path": "projects/original.md", "new_title": "Copy", "new_category": "concept"},
+])
+
+# Переименование файлов
+files(operation="rename", items=[
+    {"old_file_path": "projects/old_name.md", "new_title": "New Name"},
+])
+
+# Список файлов
+files(operation="list", items=[
+    {"category": "project"},  # опционально
+])
 ```
 
-#### `update_memory_file`
-Update existing file.
-```python
-{
-  "file_path": "projects/project_alpha.md",
-  "content": "Updated content...",
-  "update_mode": "replace"  # replace, append, prepend
-}
-```
+### 🔍 2. search - Поиск
 
-#### `delete_memory_file`
-Delete a memory file.
-```python
-{
-  "file_path": "projects/old_project.md"
-}
-```
-
-#### `get_file_content`
-Get file content.
-```python
-{
-  "file_path": "projects/project_alpha.md"
-}
-```
-
-#### `list_files`
-List all memory files.
-```python
-{
-  "category": "project"  # optional filter
-}
-```
-
-### Search
-
-#### `search` (Unified Search)
-Unified search method that replaces `search_memories` and `search_within_file`.
-
-Search across all files or within specific files with flexible filtering:
+**Всегда работает с массивом запросов.** Поддерживает режимы: `hybrid` (рекомендуется), `vector`, `fulltext`.
 
 ```python
-{
-  "query": "machine learning concepts",
-  "search_mode": "hybrid",  # hybrid, vector, fulltext
-  "limit": 10,
-  "file_path": "concepts/ml_concepts.md",  # optional: search within file
-  "category_filter": "concept",  # optional: filter by category
-  "tag_filter": ["important", "active"]  # optional: filter by tags (ALL must match)
-}
-```
-
-**Search Modes:**
-- `hybrid` (recommended): Combines vector and fulltext search with RRF ranking
-- `vector`: Semantic similarity search using embeddings
-- `fulltext`: Keyword-based search using PostgreSQL fulltext
-
-**Examples:**
-```python
-# Search across all files
-search("machine learning", search_mode="hybrid", limit=20)
-
-# Search within specific file
-search("neural networks", file_path="concepts/ml_concepts.md")
-
-# Search with category filter
-search("project status", category_filter="project")
-
-# Search with tag filter
-search("important notes", tag_filter=["important", "active"])
-```
-
-### Editing
-
-#### `edit_file` (Unified Editing)
-Universal editing method that replaces `edit_section`, `find_replace`, and `insert_content`.
-
-Supports three edit types:
-
-**1. Section Editing:**
-```python
-{
-  "file_path": "projects/my_project.md",
-  "edit_type": "section",
-  "section_header": "## Status",
-  "new_content": "In progress",
-  "mode": "replace"  # replace, append, prepend
-}
-```
-
-**2. Find and Replace:**
-```python
-{
-  "file_path": "notes.md",
-  "edit_type": "find_replace",
-  "find": "old text",
-  "replace": "new text",
-  "regex": false,  # optional: use regex pattern
-  "max_replacements": -1  # optional: -1 for all
-}
-```
-
-**3. Content Insertion:**
-```python
-{
-  "file_path": "notes.md",
-  "edit_type": "insert",
-  "content": "New note",
-  "position": "end",  # start, end, after_marker
-  "marker": "<!-- insert here -->"  # required for after_marker
-}
-```
-
-### Batch Operations
-
-All CRUD operations support batch processing for efficiency:
-
-#### `batch_create_files`
-Create multiple files at once.
-```python
-{
-  "files": [
+# Множественный поиск
+search(queries=[
     {
-      "title": "File 1",
-      "category": "project",
-      "content": "# File 1",
-      "tags": ["tag1"],
-      "metadata": {}
+        "query": "machine learning",
+        "search_mode": "hybrid",
+        "limit": 10,
+        "category_filter": "concept",  # опционально
+        "tag_filter": ["important"],  # опционально
     },
     {
-      "title": "File 2",
-      "category": "concept",
-      "content": "# File 2"
-    }
-  ]
-}
+        "query": "neural networks",
+        "file_path": "concepts/ml.md",  # поиск внутри файла
+        "limit": 5,
+    },
+])
 ```
 
-#### `batch_update_files`
-Update multiple files at once.
+**Режимы поиска:**
+- `hybrid` (рекомендуется): Комбинация векторного и полнотекстового поиска с ранжированием RRF
+- `vector`: Семантический поиск по схожести с использованием embeddings
+- `fulltext`: Поиск по ключевым словам с использованием PostgreSQL fulltext
+
+### ✏️ 3. edit - Редактирование
+
+**Всегда работает с массивом операций.** Поддерживает типы: `section`, `find_replace`, `insert`.
+
 ```python
-{
-  "updates": [
+# Множественное редактирование
+edit(operations=[
     {
-      "file_path": "projects/file1.md",
-      "content": "Updated content",
-      "update_mode": "replace"
+        "file_path": "projects/project.md",
+        "edit_type": "section",
+        "section_header": "## Status",
+        "new_content": "In progress",
+        "mode": "replace"  # replace, append, prepend
     },
     {
-      "file_path": "projects/file2.md",
-      "content": "More content",
-      "update_mode": "append"
-    }
-  ]
-}
-```
-
-#### `batch_delete_files`
-Delete multiple files at once.
-```python
-{
-  "file_paths": [
-    "projects/file1.md",
-    "projects/file2.md"
-  ]
-}
-```
-
-#### `batch_search`
-Perform multiple searches at once.
-```python
-{
-  "queries": [
-    {
-      "query": "machine learning",
-      "search_mode": "hybrid",
-      "limit": 10
+        "file_path": "notes.md",
+        "edit_type": "find_replace",
+        "find": "old text",
+        "replace": "new text",
+        "regex": false,  # опционально
+        "max_replacements": -1  # опционально, -1 для всех
     },
     {
-      "query": "neural networks",
-      "file_path": "concepts/ml.md",
-      "limit": 5
-    }
-  ]
-}
+        "file_path": "notes.md",
+        "edit_type": "insert",
+        "content": "New note",
+        "position": "end",  # start, end, after_marker
+        "marker": "<!-- insert here -->"  # для after_marker
+    },
+])
 ```
 
-### Memory Management
+### 🏷️ 4. tags - Управление тегами
 
-#### `initialize_memory`
-Initialize memory to base state (creates `main.md` and `files_index.json`).
+**Всегда работает с массивом файлов.** Поддерживает операции: `add`, `remove`, `get`.
+
 ```python
-{}
+# Добавление тегов к нескольким файлам
+tags(operation="add", items=[
+    {"file_path": "projects/project1.md", "tags": ["important", "active"]},
+    {"file_path": "projects/project2.md", "tags": ["important"]},
+])
+
+# Удаление тегов
+tags(operation="remove", items=[
+    {"file_path": "projects/project1.md", "tags": ["old-tag"]},
+])
+
+# Получение тегов
+tags(operation="get", items=[
+    {"file_path": "projects/project1.md"},
+])
 ```
 
-#### `reset_memory`
-Reset memory to base state (deletes all files except `main.md` and `files_index.json`, clears database).
+### 🎯 5. main - Операции с main.md
+
+**Всегда работает с массивом операций.** Поддерживает операции: `append`, `goal`, `task`, `plan`.
+
 ```python
-{}
+# Добавление заметок в секции
+main(operation="append", items=[
+    {"content": "Important note", "section": "Recent Notes"},  # Recent Notes, Current Goals, Future Plans, Plans, Quick Reference
+])
+
+# Управление целями
+main(operation="goal", items=[
+    {"goal": "Complete project", "action": "add"},  # add, complete, remove
+    {"goal": "Test system", "action": "add"},
+])
+
+# Управление задачами
+main(operation="task", items=[
+    {"task": "Completed task 1", "action": "add"},
+])
+
+# Управление планами
+main(operation="plan", items=[
+    {"plan": "Implement feature X", "action": "add"},  # add, complete
+])
 ```
 
-### Main Memory File Operations
+### 🔧 6. memory - Управление памятью
 
-#### `append_to_main_memory`
-Add to main.md sections.
+Поддерживает операции: `initialize`, `reset`.
+
 ```python
-{
-  "content": "Important note...",
-  "section": "Recent Notes"  # Recent Notes, Current Goals, Future Plans, Quick Reference
-}
+# Инициализация памяти
+memory(operation="initialize")
+
+# Сброс памяти
+memory(operation="reset")
 ```
 
-#### `update_goals`
-Manage goals in main.md.
+### 📄 7. extract - Извлечение секций
+
+**Всегда работает с массивом запросов.**
+
 ```python
-{
-  "goal": "Complete agent memory implementation",
-  "action": "add"  # add, complete, remove
-}
+# Извлечение секций из нескольких файлов
+extract(requests=[
+    {"file_path": "projects/project.md", "section_header": "## Status"},
+    {"file_path": "concepts/concept.md", "section_header": "## Details"},
+])
 ```
 
-#### `update_tasks`
-Add completed tasks.
+### 📋 8. list - Списки файлов и секций
+
+**Всегда работает с массивом запросов.**
+
 ```python
-{
-  "task": "Implemented hybrid search with RRF"
-}
+# Получение списков файлов и секций
+list(requests=[
+    {"type": "files", "category": "project"},  # опционально
+    {"type": "sections", "file_path": "projects/project.md"},
+])
 ```
 
-### Tag Management
+### 💡 9. help - Помощь и рекомендации
 
-#### `add_tags`
-Add tags to a file.
+**Единый инструмент для получения помощи, рекомендаций, гайдов и примеров использования.**
+
 ```python
-{
-  "file_path": "projects/my_project.md",
-  "tags": ["important", "active"]
-}
-```
+# Полный гайд
+help(topic=None)  # или help(topic="all")
 
-#### `remove_tags`
-Remove tags from a file.
-```python
-{
-  "file_path": "projects/my_project.md",
-  "tags": ["old-tag"]
-}
-```
-
-#### `get_tags`
-Get all tags for a file.
-```python
-{
-  "file_path": "projects/my_project.md"
-}
-```
-
-### File Operations
-
-#### `rename_file`
-Rename a memory file.
-```python
-{
-  "old_file_path": "projects/old_name.md",
-  "new_title": "New Name"
-}
-```
-
-#### `move_file`
-Move a file to a different category.
-```python
-{
-  "file_path": "projects/my_project.md",
-  "new_category": "concept"
-}
-```
-
-#### `copy_file`
-Create a copy of a memory file.
-```python
-{
-  "source_file_path": "projects/original.md",
-  "new_title": "Copy of Original",
-  "new_category": "concept"  # optional
-}
+# Гайд по конкретной теме
+help(topic="files")  # files, search, edit, tags, main, memory, extract, list, examples
 ```
 
 ## MCP Resources
 
-Access memory files directly:
+Прямой доступ к файлам памяти через ресурсы:
 
-- `memory://main` - Main agent notes
-- `memory://file/{file_path}` - Specific memory file
+- **`memory://main`** - Главный файл заметок агента (main.md)
+- **`memory://file/{file_path}`** - Конкретный файл памяти по пути
+
+**Примеры:**
+- `memory://main` - получить main.md
+- `memory://file/projects/my_project.md` - получить конкретный файл проекта
 
 ## MCP Prompts
 
-Enhanced prompts with detailed instructions:
+Расширенные промпты с детальными инструкциями:
 
-- `remember_conversation(topic, key_points)` - Save conversation memory with structured format
-- `recall_context(topic)` - Search and recall context with search tips
-- `memory_usage_guide()` - Comprehensive guide on using the memory system
-- `active_memory_usage()` - Prompt encouraging active memory usage
+### `remember_conversation(topic, key_points)`
+Сохранить память о разговоре в структурированном формате.
+```python
+{
+  "topic": "Обсуждение проекта",
+  "key_points": "Основные моменты разговора..."
+}
+```
+Создает файл категории `conversation` с датой, контекстом, ключевыми моментами, решениями и действиями.
 
-**Important:** Agents should actively use the memory system throughout conversations to maintain context and provide better assistance.
+### `recall_context(topic)`
+Поиск и восстановление контекста с советами по поиску.
+```python
+{
+  "topic": "информация о проекте"
+}
+```
+Выполняет поиск по теме и предоставляет инструкции по использованию результатов.
+
+### `memory_usage_guide()`
+Полное руководство по использованию системы памяти.
+Возвращает детальное описание всех инструментов, сценариев использования и лучших практик.
+
+### `active_memory_usage()`
+Промпт, поощряющий активное использование памяти.
+Напоминает агенту о необходимости использовать систему памяти на протяжении всего разговора.
+
+**Важно:** Агенты должны активно использовать систему памяти на протяжении всего разговора для поддержания контекста и предоставления лучшей помощи.
+
+## Полный список инструментов
+
+### Всего доступно 9 универсальных MCP инструментов:
+
+1. **`files`** - Управление файлами (create, read, update, delete, move, copy, rename, list)
+2. **`search`** - Поиск (hybrid, vector, fulltext)
+3. **`edit`** - Редактирование (section, find_replace, insert)
+4. **`tags`** - Управление тегами (add, remove, get)
+5. **`main`** - Операции с main.md (append, goal, task, plan)
+6. **`memory`** - Управление памятью (initialize, reset)
+7. **`extract`** - Извлечение секций
+8. **`list`** - Списки файлов и секций
+9. **`help`** - Помощь, рекомендации, гайды и примеры
+
+**Все инструменты всегда работают с массивами** - нет разделения на batch и не-batch версии!
+
+**Ресурсы (2):**
+- `memory://main` - Главный файл
+- `memory://file/{path}` - Файл по пути
+
+**Промпты (4):**
+- `remember_conversation` - Сохранить разговор
+- `recall_context` - Восстановить контекст
+- `memory_usage_guide` - Руководство
+- `active_memory_usage` - Активное использование
 
 ## Memory Structure
 
@@ -745,14 +718,14 @@ await memory.initialize()
 
 ## Best Practices
 
-1. **Use batch operations** when working with multiple files
-2. **Search before creating** to avoid duplicates
-3. **Use descriptive titles and tags** for better organization
-4. **Keep main.md updated** with goals and tasks
-5. **Actively use memory** throughout conversations
-6. **Use hybrid search mode** for best results
-7. **Initialize memory** before first use
-8. **Reset memory** when starting fresh
+1. **Все операции работают с массивами** - используйте массивы даже для одного элемента
+2. **Search before creating** - ищите перед созданием, чтобы избежать дубликатов
+3. **Use descriptive titles and tags** - используйте описательные заголовки и теги
+4. **Keep main.md updated** - обновляйте цели, задачи и планы в main.md
+5. **Actively use memory** - активно используйте память на протяжении разговора
+6. **Use hybrid search mode** - используйте гибридный режим поиска для лучших результатов
+7. **Initialize memory** - инициализируйте память перед первым использованием
+8. **Use help tool** - используйте инструмент help для получения рекомендаций и примеров
 
 ## Troubleshooting
 

@@ -51,7 +51,7 @@ class MemoryFileModel(Base):
     file_hash = Column(String(64), nullable=False)  # SHA256
     word_count = Column(Integer, nullable=False, default=0)
     tags = Column(ARRAY(String), nullable=False, server_default='{}')
-    metadata = Column(JSON, nullable=False, server_default='{}')
+    file_metadata = Column('metadata', JSON, nullable=False, server_default='{}')
 
     # Relationships
     chunks = relationship(

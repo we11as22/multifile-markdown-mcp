@@ -59,7 +59,34 @@ class MemoryRepository:
         await self.session.refresh(file_model)
 
         logger.info("memory_file_created", file_id=file_model.id, file_path=file_path)
-        return MemoryFile.model_validate(file_model)
+        # Convert file_metadata to dict - handle both dict and JSON types
+        if hasattr(file_model.file_metadata, '__dict__'):
+            metadata_dict = {}
+        elif isinstance(file_model.file_metadata, dict):
+            metadata_dict = file_model.file_metadata
+        else:
+            # Try to convert JSON/other types to dict
+            try:
+                import json
+                if hasattr(file_model.file_metadata, 'copy'):
+                    metadata_dict = file_model.file_metadata.copy()
+                else:
+                    metadata_dict = dict(file_model.file_metadata) if file_model.file_metadata else {}
+            except (TypeError, AttributeError):
+                metadata_dict = {}
+        file_dict = {
+            "id": file_model.id,
+            "file_path": file_model.file_path,
+            "title": file_model.title,
+            "category": file_model.category,
+            "created_at": file_model.created_at,
+            "updated_at": file_model.updated_at,
+            "file_hash": file_model.file_hash,
+            "word_count": file_model.word_count,
+            "tags": file_model.tags or [],
+            "metadata": metadata_dict,
+        }
+        return MemoryFile.model_validate(file_dict)
 
     async def get_file_by_id(self, file_id: int) -> Optional[MemoryFile]:
         """Get memory file by ID"""
@@ -67,7 +94,22 @@ class MemoryRepository:
             select(MemoryFileModel).where(MemoryFileModel.id == file_id)
         )
         file_model = result.scalar_one_or_none()
-        return MemoryFile.model_validate(file_model) if file_model else None
+        if file_model:
+            metadata_dict = file_model.file_metadata if isinstance(file_model.file_metadata, dict) else {}
+            file_dict = {
+                "id": file_model.id,
+                "file_path": file_model.file_path,
+                "title": file_model.title,
+                "category": file_model.category,
+                "created_at": file_model.created_at,
+                "updated_at": file_model.updated_at,
+                "file_hash": file_model.file_hash,
+                "word_count": file_model.word_count,
+                "tags": file_model.tags or [],
+                "metadata": metadata_dict,
+            }
+            return MemoryFile.model_validate(file_dict)
+        return None
 
     async def get_file_by_path(self, file_path: str) -> Optional[MemoryFile]:
         """Get memory file by path"""
@@ -75,7 +117,30 @@ class MemoryRepository:
             select(MemoryFileModel).where(MemoryFileModel.file_path == file_path)
         )
         file_model = result.scalar_one_or_none()
-        return MemoryFile.model_validate(file_model) if file_model else None
+        if file_model:
+            # Convert file_metadata to dict - handle both dict and JSON types
+            if isinstance(file_model.file_metadata, dict):
+                metadata_dict = file_model.file_metadata
+            else:
+                try:
+                    metadata_dict = dict(file_model.file_metadata) if file_model.file_metadata else {}
+                except (TypeError, AttributeError):
+                    metadata_dict = {}
+            # Create dict for validation
+            file_dict = {
+                "id": file_model.id,
+                "file_path": file_model.file_path,
+                "title": file_model.title,
+                "category": file_model.category,
+                "created_at": file_model.created_at,
+                "updated_at": file_model.updated_at,
+                "file_hash": file_model.file_hash,
+                "word_count": file_model.word_count,
+                "tags": file_model.tags or [],
+                "metadata": metadata_dict,
+            }
+            return MemoryFile.model_validate(file_dict)
+        return None
 
     async def get_all_files(self, category: Optional[MemoryCategory] = None) -> list[MemoryFile]:
         """Get all memory files, optionally filtered by category"""
@@ -85,7 +150,23 @@ class MemoryRepository:
 
         result = await self.session.execute(query.order_by(MemoryFileModel.updated_at.desc()))
         files = result.scalars().all()
-        return [MemoryFile.model_validate(f) for f in files]
+        result_files = []
+        for f in files:
+            metadata_dict = f.file_metadata if isinstance(f.file_metadata, dict) else {}
+            file_dict = {
+                "id": f.id,
+                "file_path": f.file_path,
+                "title": f.title,
+                "category": f.category,
+                "created_at": f.created_at,
+                "updated_at": f.updated_at,
+                "file_hash": f.file_hash,
+                "word_count": f.word_count,
+                "tags": f.tags or [],
+                "metadata": metadata_dict,
+            }
+            result_files.append(MemoryFile.model_validate(file_dict))
+        return result_files
 
     async def upsert_file(
         self,
@@ -112,7 +193,7 @@ class MemoryRepository:
                     file_hash=file_hash,
                     word_count=word_count,
                     tags=tags,
-                    metadata=metadata,
+                    file_metadata=metadata,
                     updated_at=datetime.utcnow(),
                 )
             )

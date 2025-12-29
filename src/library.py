@@ -179,6 +179,11 @@ class MemoryLibrary:
             search_engine=search_engine,
         )
 
+        # Ensure main.md exists
+        if not (self.memory_files_path / "main.md").exists():
+            from scripts.init_memory_structure import init_memory_structure
+            init_memory_structure(self.memory_files_path)
+        
         self._initialized = True
         logger.info("memory_library_initialized")
 

@@ -137,6 +137,21 @@ class IndexManager:
     def add_future_plan(self, plan: str) -> None:
         """Add to Future Plans section"""
         self.append_to_section("Future Plans", f"- {plan}")
+    
+    def add_plan(self, plan: str) -> None:
+        """Add a plan to Plans section"""
+        self.append_to_section("Plans", f"- [ ] {plan}")
+    
+    def complete_plan(self, plan: str) -> None:
+        """Mark plan as completed"""
+        content = self.read_main_file()
+        
+        # Find and remove from Plans
+        plan_pattern = rf"- \[ \] {re.escape(plan)}"
+        content = re.sub(plan_pattern, f"- [x] {plan}", content)
+        
+        self.write_main_file(content)
+        logger.info("plan_completed", plan=plan)
 
 
 class JsonIndexManager:

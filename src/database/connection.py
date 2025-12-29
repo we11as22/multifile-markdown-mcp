@@ -54,8 +54,8 @@ class DatabaseManager:
             self.database_url,
             echo=False,
             pool_pre_ping=True,
-            pool_size=pool_min_size,
-            max_overflow=pool_max_size - pool_min_size,
+            pool_size=self.pool_min_size,
+            max_overflow=self.pool_max_size - self.pool_min_size,
         )
 
         # Create async session maker

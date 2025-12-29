@@ -91,16 +91,35 @@ class FileSyncService:
             # Generate embeddings in batches (if provider available)
             all_embeddings = []
             if self.embedding_provider is not None:
-                chunk_texts = [c['content'] for c in chunks]
-                for i in range(0, len(chunk_texts), self.batch_size):
-                    batch = chunk_texts[i:i + self.batch_size]
-                    embeddings = await self.embedding_provider.embed_batch(batch)
-                    all_embeddings.extend(embeddings)
-                    logger.debug(
-                        "embeddings_generated",
-                        batch_start=i,
-                        batch_size=len(batch)
-                    )
+                try:
+                    chunk_texts = [c['content'] for c in chunks]
+                    for i in range(0, len(chunk_texts), self.batch_size):
+                        batch = chunk_texts[i:i + self.batch_size]
+                        try:
+                            embeddings = await self.embedding_provider.embed_batch(batch)
+                            all_embeddings.extend(embeddings)
+                            logger.debug(
+                                "embeddings_generated",
+                                batch_start=i,
+                                batch_size=len(batch)
+                            )
+                        except Exception as embed_error:
+                            # If embedding fails, continue in fulltext-only mode
+                            logger.warning(
+                                "embedding_failed_fallback_to_fulltext",
+                                error=str(embed_error),
+                                batch_start=i
+                            )
+                            all_embeddings.extend([None] * len(batch))
+                    
+                    # If no embeddings were generated, use None for all
+                    if len(all_embeddings) != len(chunks):
+                        logger.warning("embeddings_partial_failure_using_fulltext_only")
+                        all_embeddings = [None] * len(chunks)
+                except Exception as e:
+                    # Fallback to fulltext-only mode if embedding provider fails completely
+                    logger.warning("embedding_provider_failed_fallback_to_fulltext", error=str(e))
+                    all_embeddings = [None] * len(chunks)
             else:
                 # No embeddings - fulltext-only mode
                 all_embeddings = [None] * len(chunks)

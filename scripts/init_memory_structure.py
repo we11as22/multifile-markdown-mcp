@@ -61,6 +61,12 @@ This section maintains an index of all specialized memory files with description
 
 ---
 
+## Plans
+
+<!-- Detailed plans and action items -->
+
+---
+
 ## Recent Notes
 
 <!-- Recent session notes and important observations -->
