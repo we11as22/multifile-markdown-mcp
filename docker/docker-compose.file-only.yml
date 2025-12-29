@@ -1,0 +1,57 @@
+version: '3.8'
+
+# Docker Compose для режима без БД (file-only mode)
+# Использование: docker-compose -f docker-compose.file-only.yml up -d
+
+services:
+  # MCP Server (без БД)
+  mcp-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: agent-memory-mcp-file-only
+    environment:
+      # Server
+      - MCP_SERVER_NAME=${MCP_SERVER_NAME:-agent-memory}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+      # Storage
+      - MEMORY_FILES_PATH=/app/memory_files
+      - MAIN_FILE_NAME=${MAIN_FILE_NAME:-main.md}
+
+      # Database disabled
+      - USE_DATABASE=false
+
+      # Search is not available in file-only mode
+      # Embedding providers are not used
+    volumes:
+      # Mount memory files directory
+      - ../memory_files:/app/memory_files
+      # Mount logs directory
+      - mcp_logs:/app/logs
+    ports:
+      # Expose for stdio transport (optional)
+      # Используем другой порт, чтобы не конфликтовать с основным compose
+      - "8001:8000"
+    networks:
+      - agent-memory-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  # MCP server logs
+  mcp_logs:
+    driver: local
+
+networks:
+  agent-memory-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+

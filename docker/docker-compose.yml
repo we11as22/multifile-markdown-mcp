@@ -62,7 +62,8 @@ services:
       - MEMORY_FILES_PATH=/app/memory_files
       - MAIN_FILE_NAME=${MAIN_FILE_NAME:-main.md}
 
-      # Database
+      # Database (optional - set USE_DATABASE=false to disable)
+      - USE_DATABASE=${USE_DATABASE:-true}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_DB=${POSTGRES_DB:-agent_memory}
@@ -117,6 +118,8 @@ services:
       # Expose for stdio transport (optional)
       - "8000:8000"
     depends_on:
+      # PostgreSQL is optional - only required if USE_DATABASE=true
+      # If USE_DATABASE=false, start only mcp-server: docker-compose up -d mcp-server
       postgres:
         condition: service_healthy
       ollama:

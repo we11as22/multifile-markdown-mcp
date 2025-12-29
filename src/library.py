@@ -50,6 +50,7 @@ class MemoryLibrary:
         database_url: Optional[str] = None,
         embedding_provider: Optional[str] = None,
         embedding_config: Optional[dict[str, Any]] = None,
+        use_database: Optional[bool] = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -66,6 +67,13 @@ class MemoryLibrary:
         self.database_url = database_url
         self.embedding_provider_name = embedding_provider
         self.embedding_config = embedding_config or {}
+        # Check use_database from kwargs or environment
+        if use_database is None:
+            from config.settings import Settings
+            settings = Settings()
+            self.use_database = settings.use_database
+        else:
+            self.use_database = use_database
         self.kwargs = kwargs
 
         # Will be initialized in initialize()
@@ -103,71 +111,82 @@ class MemoryLibrary:
         sync_service: Optional[FileSyncService] = None
         search_engine: Optional[HybridSearchEngine] = None
 
-        try:
-            # Initialize database connection
-            self.db_manager = DatabaseManager(
-                database_url=database_url,
-                pool_min_size=self.kwargs.get("db_pool_min_size", 5),
-                pool_max_size=self.kwargs.get("db_pool_max_size", 20),
-            )
-            await self.db_manager.connect()
+        # Check if database should be used
+        if not self.use_database:
+            logger.info("database_disabled_using_file_only_mode")
+        else:
+            try:
+                # Initialize database connection
+                # Initialize database connection
+                self.db_manager = DatabaseManager(
+                    database_url=database_url,
+                    pool_min_size=self.kwargs.get("db_pool_min_size", 5),
+                    pool_max_size=self.kwargs.get("db_pool_max_size", 20),
+                )
+                await self.db_manager.connect()
 
-            if not await self.db_manager.health_check():
-                raise RuntimeError("Database health check failed")
+                if not await self.db_manager.health_check():
+                    raise RuntimeError("Database health check failed")
 
-            # Initialize embedding provider
-            embedding_provider = None
-            if self.embedding_provider_name:
-                # Create a temporary settings object for provider creation
-                temp_settings = Settings()
-                temp_settings.embedding_provider = self.embedding_provider_name
-                # Update with provided config
-                for key, value in self.embedding_config.items():
-                    setattr(temp_settings, key, value)
-                temp_settings.validate_provider_config()
-                embedding_provider = create_embedding_provider(temp_settings)
-            else:
-                # Try to use embedding provider from settings
-                settings = Settings()
-                if settings.embedding_provider:
-                    try:
-                        settings.validate_provider_config()
-                        embedding_provider = create_embedding_provider(settings)
-                        logger.info("using_embedding_provider_from_settings", provider=settings.embedding_provider)
-                    except Exception as e:
-                        logger.warning("failed_to_initialize_embedding_from_settings", error=str(e))
+                # Initialize embedding provider (only if database is enabled)
+                embedding_provider = None
+                if self.embedding_provider_name:
+                    # Create a temporary settings object for provider creation
+                    temp_settings = Settings()
+                    temp_settings.embedding_provider = self.embedding_provider_name
+                    # Update with provided config
+                    for key, value in self.embedding_config.items():
+                        setattr(temp_settings, key, value)
+                    temp_settings.validate_provider_config()
+                    embedding_provider = create_embedding_provider(temp_settings)
+                else:
+                    # Try to use embedding provider from settings
+                    settings = Settings()
+                    if settings.embedding_provider:
+                        try:
+                            settings.validate_provider_config()
+                            embedding_provider = create_embedding_provider(settings)
+                            logger.info("using_embedding_provider_from_settings", provider=settings.embedding_provider)
+                        except Exception as e:
+                            logger.warning("failed_to_initialize_embedding_from_settings", error=str(e))
 
-            # Initialize chunker
-            chunk_size = self.kwargs.get("chunk_size", 800)
-            chunk_overlap = self.kwargs.get("chunk_overlap", 200)
-            chunker = MarkdownChunker(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-            )
+                # Initialize chunker
+                chunk_size = self.kwargs.get("chunk_size", 800)
+                chunk_overlap = self.kwargs.get("chunk_overlap", 200)
+                chunker = MarkdownChunker(
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                )
 
-            # Initialize repository and sync service
-            session = self.db_manager.get_session()
-            pool = await self.db_manager.get_pool()
+                # Initialize repository and sync service
+                session = self.db_manager.get_session()
+                pool = await self.db_manager.get_pool()
 
-            repository = MemoryRepository(session, pool)
-            sync_service = FileSyncService(
-                file_manager=file_manager,
-                repository=repository,
-                chunker=chunker,
-                embedding_provider=embedding_provider,
-                batch_size=self.kwargs.get("embedding_batch_size", 100),
-            )
+                repository = MemoryRepository(session, pool)
+                sync_service = FileSyncService(
+                    file_manager=file_manager,
+                    repository=repository,
+                    chunker=chunker,
+                    embedding_provider=embedding_provider,
+                    batch_size=self.kwargs.get("embedding_batch_size", 100),
+                )
 
-            # Initialize search engine (works even without embeddings - uses fulltext)
-            search_engine = HybridSearchEngine(pool, embedding_provider)
+                # Initialize search engine (works even without embeddings - uses fulltext)
+                search_engine = HybridSearchEngine(pool, embedding_provider)
 
-            logger.info("database_initialized", url=database_url)
-        except Exception as e:
-            logger.error("database_initialization_failed", error=str(e))
-            raise RuntimeError(
-                f"Failed to initialize database. Database is required for full functionality. "
-                f"Error: {str(e)}"
-            ) from e
+                logger.info("database_initialized", url=database_url)
+            except Exception as e:
+                logger.error("database_initialization_failed", error=str(e))
+                if self.use_database:
+                    # If database is required but failed, raise error
+                    raise RuntimeError(
+                        f"Failed to initialize database. Database is required when use_database=True. "
+                        f"Error: {str(e)}"
+                    ) from e
+                else:
+                    # If database is optional, just log warning
+                    logger.warning("database_initialization_failed_continuing_without_db", error=str(e))
+                    self.db_manager = None
 
         # Initialize memory tools (repository, sync_service, search_engine can be None for file-only mode)
         self.memory_tools = MemoryTools(
@@ -302,6 +321,63 @@ class MemoryLibrary:
         if not self._initialized:
             raise RuntimeError("Library not initialized. Call initialize() first.")
         return await self.memory_tools.batch_search(queries)
+    
+    # Tag management
+    async def add_tags(self, file_path: str, tags: list[str]) -> dict[str, Any]:
+        """Add tags to a memory file"""
+        if not self._initialized:
+            raise RuntimeError("Library not initialized. Call initialize() first.")
+        return await self.memory_tools.add_tags(file_path, tags)
+    
+    async def remove_tags(self, file_path: str, tags: list[str]) -> dict[str, Any]:
+        """Remove tags from a memory file"""
+        if not self._initialized:
+            raise RuntimeError("Library not initialized. Call initialize() first.")
+        return await self.memory_tools.remove_tags(file_path, tags)
+    
+    async def get_tags(self, file_path: str) -> dict[str, Any]:
+        """Get all tags for a memory file"""
+        if not self._initialized:
+            raise RuntimeError("Library not initialized. Call initialize() first.")
+        return await self.memory_tools.get_tags(file_path)
+    
+    # Main memory operations
+    async def append_to_main(self, content: str, section: str = "Recent Notes") -> dict[str, str]:
+        """Append content to a section in main.md"""
+        if not self._initialized:
+            raise RuntimeError("Library not initialized. Call initialize() first.")
+        return await self.memory_tools.append_to_main_memory(content, section)
+    
+    async def add_goal(self, goal: str) -> dict[str, str]:
+        """Add a goal to main.md"""
+        if not self._initialized:
+            raise RuntimeError("Library not initialized. Call initialize() first.")
+        return await self.memory_tools.update_goals(goal, "add")
+    
+    async def add_task(self, task: str) -> dict[str, str]:
+        """Add a task to main.md"""
+        if not self._initialized:
+            raise RuntimeError("Library not initialized. Call initialize() first.")
+        return await self.memory_tools.update_tasks(task, "add")
+    
+    # File operations
+    async def rename_file(self, old_file_path: str, new_title: str) -> dict[str, Any]:
+        """Rename a memory file"""
+        if not self._initialized:
+            raise RuntimeError("Library not initialized. Call initialize() first.")
+        return await self.memory_tools.rename_file(old_file_path, new_title)
+    
+    async def move_file(self, file_path: str, new_category: str) -> dict[str, Any]:
+        """Move a file to a different category"""
+        if not self._initialized:
+            raise RuntimeError("Library not initialized. Call initialize() first.")
+        return await self.memory_tools.move_file(file_path, new_category)
+    
+    async def copy_file(self, source_file_path: str, new_title: str, new_category: Optional[str] = None) -> dict[str, Any]:
+        """Create a copy of a memory file"""
+        if not self._initialized:
+            raise RuntimeError("Library not initialized. Call initialize() first.")
+        return await self.memory_tools.copy_file(source_file_path, new_title, new_category)
 
 
 def get_langchain_tools(memory: MemoryLibrary) -> list[Any]:

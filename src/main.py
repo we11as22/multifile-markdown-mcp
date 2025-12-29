@@ -38,21 +38,29 @@ async def initialize_server() -> None:
 
     logger.info("initializing_agent_memory_mcp_server", version="0.1.0")
 
-    # Initialize database connection
-    db_manager = DatabaseManager(
-        database_url=settings.database_url,
-        pool_min_size=settings.db_pool_min_size,
-        pool_max_size=settings.db_pool_max_size,
-    )
-    await db_manager.connect()
+    # Initialize database connection (if enabled)
+    db_manager = None
+    repository = None
+    sync_service = None
+    search_engine = None
+    
+    if settings.use_database:
+        db_manager = DatabaseManager(
+            database_url=settings.database_url,
+            pool_min_size=settings.db_pool_min_size,
+            pool_max_size=settings.db_pool_max_size,
+        )
+        await db_manager.connect()
 
-    # Check database health
-    if not await db_manager.health_check():
-        raise RuntimeError("Database health check failed")
+        # Check database health
+        if not await db_manager.health_check():
+            raise RuntimeError("Database health check failed")
+    else:
+        logger.info("database_disabled_using_file_only_mode")
 
-    # Initialize embedding provider (optional - falls back to fulltext-only mode)
+    # Initialize embedding provider (only if database is enabled)
     embedding_provider = None
-    if settings.embedding_provider:
+    if settings.use_database and settings.embedding_provider:
         try:
             settings.validate_provider_config()
             embedding_provider = create_embedding_provider(settings)
@@ -62,8 +70,8 @@ async def initialize_server() -> None:
                 "embedding_provider_initialization_failed_using_fulltext_only",
                 error=str(e)
             )
-    else:
-        logger.info("no_embedding_provider_configured_using_fulltext_only")
+    elif not settings.use_database:
+        logger.info("database_disabled_embedding_provider_not_used")
 
     # Initialize file manager
     file_manager = FileManager(settings.memory_files_path_obj)
@@ -73,59 +81,61 @@ async def initialize_server() -> None:
     json_index_path = settings.memory_files_path_obj / "files_index.json"
     json_index_manager = JsonIndexManager(json_index_path)
 
-    # Initialize chunker
-    chunker = MarkdownChunker(
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
+    # Initialize chunker (only if database is enabled)
+    chunker = None
+    if settings.use_database:
+        chunker = MarkdownChunker(
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+        )
+
+    # Initialize repository and sync service (only if database is enabled)
+    if settings.use_database and db_manager:
+        session = db_manager.get_session()
+        pool = await db_manager.get_pool()
+
+        try:
+            repository = MemoryRepository(session, pool)
+
+            # Initialize sync service
+            sync_service = FileSyncService(
+                file_manager=file_manager,
+                repository=repository,
+                chunker=chunker,
+                embedding_provider=embedding_provider,
+                batch_size=settings.embedding_batch_size,
+            )
+
+            # Perform initial sync
+            logger.info("performing_initial_sync")
+            await sync_service.sync_all_files()
+
+            # Initialize search engine
+            search_engine = HybridSearchEngine(pool, embedding_provider)
+        finally:
+            await session.close()
+
+    # Initialize memory tools
+    memory_tools = MemoryTools(
+        file_manager=file_manager,
+        index_manager=index_manager,
+        json_index_manager=json_index_manager,
+        repository=repository,
+        sync_service=sync_service,
+        search_engine=search_engine,
     )
+    
+    # Initialize unified tools
+    unified_tools = UnifiedMemoryTools(memory_tools)
 
-    # Initialize repository (we'll create a new session for each request)
-    # For now, create one for initial sync
-    session = db_manager.get_session()
-    pool = await db_manager.get_pool()
-
-    try:
-        repository = MemoryRepository(session, pool)
-
-        # Initialize sync service
-        sync_service = FileSyncService(
-            file_manager=file_manager,
-            repository=repository,
-            chunker=chunker,
-            embedding_provider=embedding_provider,
-            batch_size=settings.embedding_batch_size,
-        )
-
-        # Perform initial sync
-        logger.info("performing_initial_sync")
-        await sync_service.sync_all_files()
-
-        # Initialize search engine
-        search_engine = HybridSearchEngine(pool, embedding_provider)
-
-        # Initialize memory tools
-        memory_tools = MemoryTools(
-            file_manager=file_manager,
-            index_manager=index_manager,
-            json_index_manager=json_index_manager,
-            repository=repository,
-            sync_service=sync_service,
-            search_engine=search_engine,
-        )
-        
-        # Initialize unified tools
-        unified_tools = UnifiedMemoryTools(memory_tools)
-
-        logger.info("server_initialized_successfully")
-
-    finally:
-        await session.close()
+    logger.info("server_initialized_successfully", use_database=settings.use_database)
 
 
 async def shutdown_server() -> None:
     """Cleanup on server shutdown"""
     logger.info("shutting_down_server")
-    await db_manager.disconnect()
+    if db_manager:
+        await db_manager.disconnect()
     logger.info("server_shutdown_complete")
 
 

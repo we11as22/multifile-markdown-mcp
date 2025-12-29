@@ -68,7 +68,7 @@ class MemoryTools:
         if self.sync_service:
             await self.sync_service.sync_file(file_path)
 
-        # Get file record from database for complete metadata
+        # Get file record from database for complete metadata (if available)
         file_record = None
         if self.repository:
             file_record = await self.repository.get_file_by_path(file_path)
@@ -80,20 +80,36 @@ class MemoryTools:
             category=f"{category}s"
         )
 
-        # Update JSON index (file_record should always exist if database is connected)
-        if not file_record:
-            raise RuntimeError("File record not found after sync. Database connection may be invalid.")
-        self.json_index_manager.add_or_update_file(
-            file_path=file_path,
-            title=file_record.title,
-            category=file_record.category.value,
-            description=title,
-            tags=file_record.tags,
-            metadata=file_record.metadata,
-            word_count=file_record.word_count,
-            created_at=file_record.created_at,
-            updated_at=file_record.updated_at,
-        )
+        # Update JSON index
+        if file_record:
+            # Use database record if available
+            self.json_index_manager.add_or_update_file(
+                file_path=file_path,
+                title=file_record.title,
+                category=file_record.category.value,
+                description=title,
+                tags=file_record.tags,
+                metadata=file_record.metadata,
+                word_count=file_record.word_count,
+                created_at=file_record.created_at,
+                updated_at=file_record.updated_at,
+            )
+        else:
+            # Use file-only mode - calculate word count from content
+            word_count = len(content.split())
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            self.json_index_manager.add_or_update_file(
+                file_path=file_path,
+                title=title,
+                category=f"{category}s",
+                description=title,
+                tags=tags or [],
+                metadata=metadata or {},
+                word_count=word_count,
+                created_at=now,
+                updated_at=now,
+            )
 
         logger.info("memory_file_created", file_path=file_path, title=title)
 
@@ -133,30 +149,52 @@ class MemoryTools:
             existing = self.file_manager.read_file(file_path)
             self.file_manager.write_file(file_path, content + "\n\n" + existing)
 
-        # Sync to database (required)
-        if not self.sync_service:
-            raise RuntimeError("Sync service not available. Database connection is required.")
-        await self.sync_service.sync_file(file_path, force=True)
+        # Sync to database if available
+        if self.sync_service:
+            await self.sync_service.sync_file(file_path, force=True)
 
-        # Get updated file record
-        if not self.repository:
-            raise RuntimeError("Repository not available. Database connection is required.")
-        file_record = await self.repository.get_file_by_path(file_path)
-
-        # Update JSON index (file_record should always exist if database is connected)
-        if not file_record:
-            raise RuntimeError("File record not found after sync. Database connection may be invalid.")
-        self.json_index_manager.add_or_update_file(
-            file_path=file_path,
-            title=file_record.title,
-            category=file_record.category.value,
-            description=file_record.title,
-            tags=file_record.tags,
-            metadata=file_record.metadata,
-            word_count=file_record.word_count,
-            created_at=file_record.created_at,
-            updated_at=file_record.updated_at,
-        )
+        # Update JSON index
+        if self.repository:
+            file_record = await self.repository.get_file_by_path(file_path)
+            if file_record:
+                self.json_index_manager.add_or_update_file(
+                    file_path=file_path,
+                    title=file_record.title,
+                    category=file_record.category.value,
+                    description=file_record.title,
+                    tags=file_record.tags,
+                    metadata=file_record.metadata,
+                    word_count=file_record.word_count,
+                    created_at=file_record.created_at,
+                    updated_at=file_record.updated_at,
+                )
+        else:
+            # File-only mode - update JSON index from file content
+            from pathlib import Path
+            from datetime import datetime, timezone
+            file_path_obj = Path(file_path)
+            category = file_path_obj.parent.name
+            title = file_path_obj.stem.replace('_', ' ').title()
+            word_count = len(content.split())
+            now = datetime.now(timezone.utc)
+            
+            # Get existing entry to preserve created_at and tags
+            existing = self.json_index_manager.get_file(file_path)
+            created_at = existing.get("created_at", now) if existing else now
+            tags = existing.get("tags", []) if existing else []
+            metadata = existing.get("metadata", {}) if existing else {}
+            
+            self.json_index_manager.add_or_update_file(
+                file_path=file_path,
+                title=title,
+                category=category,
+                description=title,
+                tags=tags,
+                metadata=metadata,
+                word_count=word_count,
+                created_at=datetime.fromisoformat(created_at) if isinstance(created_at, str) else created_at,
+                updated_at=now,
+            )
 
         logger.info("memory_file_updated", file_path=file_path, mode=update_mode)
 
@@ -171,12 +209,11 @@ class MemoryTools:
         if not self.file_manager.file_exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Delete from database (required)
-        if not self.repository:
-            raise RuntimeError("Repository not available. Database connection is required.")
-        file_record = await self.repository.get_file_by_path(file_path)
-        if file_record:
-            await self.repository.delete_file(file_record.id)
+        # Delete from database if available
+        if self.repository:
+            file_record = await self.repository.get_file_by_path(file_path)
+            if file_record:
+                await self.repository.delete_file(file_record.id)
 
         # Delete file from filesystem
         self.file_manager.delete_file(file_path)
@@ -199,8 +236,9 @@ class MemoryTools:
         """Append content to a section in main.md"""
         self.index_manager.append_to_section(section, content)
 
-        # Sync main.md
-        await self.sync_service.sync_file("main.md", force=True)
+        # Sync main.md if available
+        if self.sync_service:
+            await self.sync_service.sync_file("main.md", force=True)
 
         logger.info("main_memory_updated", section=section)
 
@@ -224,7 +262,8 @@ class MemoryTools:
             category=category
         )
 
-        await self.sync_service.sync_file("main.md", force=True)
+        if self.sync_service:
+            await self.sync_service.sync_file("main.md", force=True)
 
         return {"message": "Index updated successfully"}
 
@@ -244,7 +283,8 @@ class MemoryTools:
             # Remove not implemented yet
             message = "Remove action not yet implemented"
 
-        await self.sync_service.sync_file("main.md", force=True)
+        if self.sync_service:
+            await self.sync_service.sync_file("main.md", force=True)
 
         return {"message": message}
 
@@ -255,7 +295,8 @@ class MemoryTools:
     ) -> dict[str, str]:
         """Add completed task to main.md"""
         self.index_manager.add_task(task)
-        await self.sync_service.sync_file("main.md", force=True)
+        if self.sync_service:
+            await self.sync_service.sync_file("main.md", force=True)
 
         return {"message": f"Task added: {task}"}
 
@@ -268,6 +309,10 @@ class MemoryTools:
         category_filter: Optional[str] = None,
         tag_filter: Optional[list[str]] = None,
     ) -> SearchResponse:
+        """
+        Search across memory files. Requires database connection.
+        In file-only mode, search is not available.
+        """
         """
         Search across memory files with flexible filtering options.
 
@@ -362,30 +407,89 @@ class MemoryTools:
         self,
         category: Optional[Literal["project", "concept", "conversation", "preference", "other"]] = None,
     ) -> dict[str, Any]:
-        """List all memory files, optionally filtered by category"""
-        if not self.repository:
-            raise RuntimeError("Repository not available. Database connection is required.")
+        """
+        List all memory files, optionally filtered by category.
+        Uses database if available, otherwise uses JSON index.
+        Returns tree structure with descriptions.
+        """
+        if self.repository:
+            # Use database
+            if category:
+                category_enum = MemoryCategory(category)
+                files = await self.repository.get_all_files(category=category_enum)
+            else:
+                files = await self.repository.get_all_files()
 
-        # Use database
-        if category:
-            category_enum = MemoryCategory(category)
-            files = await self.repository.get_all_files(category=category_enum)
-        else:
-            files = await self.repository.get_all_files()
-
-        return {
-            "files": [
+            files_list = [
                 {
                     "file_path": f.file_path,
                     "title": f.title,
-                    "category": f.category,
+                    "category": f.category.value if hasattr(f.category, 'value') else str(f.category),
+                    "description": f.title,  # Use title as description if not available
                     "tags": f.tags,
-                    "updated_at": f.updated_at.isoformat(),
+                    "updated_at": f.updated_at.isoformat() if hasattr(f.updated_at, 'isoformat') else str(f.updated_at),
                     "word_count": f.word_count,
                 }
                 for f in files
-            ],
-            "total": len(files),
+            ]
+        else:
+            # Use JSON index (file-only mode)
+            all_files = self.json_index_manager.get_all_files()
+            
+            # Filter by category if specified
+            if category:
+                category_key = f"{category}s"  # Convert "project" to "projects"
+                files_list = [
+                    {
+                        "file_path": f.get("file_path", ""),
+                        "title": f.get("title", ""),
+                        "category": f.get("category", ""),
+                        "description": f.get("description", f.get("title", "")),
+                        "tags": f.get("tags", []),
+                        "updated_at": f.get("updated_at", ""),
+                        "word_count": f.get("word_count", 0),
+                    }
+                    for f in all_files
+                    if f.get("category", "").rstrip('s') == category  # Match "projects" with "project"
+                ]
+            else:
+                files_list = [
+                    {
+                        "file_path": f.get("file_path", ""),
+                        "title": f.get("title", ""),
+                        "category": f.get("category", ""),
+                        "description": f.get("description", f.get("title", "")),
+                        "tags": f.get("tags", []),
+                        "updated_at": f.get("updated_at", ""),
+                        "word_count": f.get("word_count", 0),
+                    }
+                    for f in all_files
+                ]
+        
+        # Build tree structure
+        tree = {}
+        for file_info in files_list:
+            file_path = file_info["file_path"]
+            category = file_info["category"]
+            
+            # Initialize category if not exists
+            if category not in tree:
+                tree[category] = []
+            
+            # Add file to category
+            tree[category].append({
+                "file_path": file_path,
+                "title": file_info["title"],
+                "description": file_info["description"],
+                "tags": file_info["tags"],
+                "updated_at": file_info["updated_at"],
+                "word_count": file_info["word_count"],
+            })
+        
+        return {
+            "files": files_list,
+            "tree": tree,  # Tree structure by category
+            "total": len(files_list),
         }
 
     # =============================
@@ -518,29 +622,50 @@ class MemoryTools:
         # Write updated content
         self.file_manager.write_file(file_path, updated_content)
 
-        # Sync to database (required)
-        if not self.sync_service:
-            raise RuntimeError("Sync service not available. Database connection is required.")
-        await self.sync_service.sync_file(file_path, force=True)
+        # Sync to database if available
+        if self.sync_service:
+            await self.sync_service.sync_file(file_path, force=True)
 
         # Update JSON index
-        if not self.repository:
-            raise RuntimeError("Repository not available. Database connection is required.")
-        file_record = await self.repository.get_file_by_path(file_path)
-
-        if not file_record:
-            raise RuntimeError("File record not found after sync. Database connection may be invalid.")
-        self.json_index_manager.add_or_update_file(
-            file_path=file_path,
-            title=file_record.title,
-            category=file_record.category.value,
-            description=file_record.title,
-            tags=file_record.tags,
-            metadata=file_record.metadata,
-            word_count=file_record.word_count,
-            created_at=file_record.created_at,
-            updated_at=file_record.updated_at,
-        )
+        if self.repository:
+            file_record = await self.repository.get_file_by_path(file_path)
+            if file_record:
+                self.json_index_manager.add_or_update_file(
+                    file_path=file_path,
+                    title=file_record.title,
+                    category=file_record.category.value,
+                    description=file_record.title,
+                    tags=file_record.tags,
+                    metadata=file_record.metadata,
+                    word_count=file_record.word_count,
+                    created_at=file_record.created_at,
+                    updated_at=file_record.updated_at,
+                )
+        else:
+            # File-only mode - update JSON index from file content
+            from pathlib import Path
+            from datetime import datetime, timezone
+            file_path_obj = Path(file_path)
+            category = file_path_obj.parent.name.rstrip('s')  # Remove trailing 's'
+            title = file_path_obj.stem.replace('_', ' ').title()
+            word_count = len(content.split())
+            now = datetime.now(timezone.utc)
+            
+            # Get existing entry to preserve created_at
+            existing = self.json_index_manager.get_file(file_path)
+            created_at = existing.get("created_at", now) if existing else now
+            
+            self.json_index_manager.add_or_update_file(
+                file_path=file_path,
+                title=title,
+                category=file_path_obj.parent.name,
+                description=title,
+                tags=existing.get("tags", []) if existing else [],
+                metadata=existing.get("metadata", {}) if existing else {},
+                word_count=word_count,
+                created_at=datetime.fromisoformat(created_at) if isinstance(created_at, str) else created_at,
+                updated_at=now,
+            )
 
         logger.info("file_edited", file_path=file_path, edit_type=edit_type)
 
@@ -618,41 +743,66 @@ class MemoryTools:
         if not self.file_manager.file_exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Get current tags from database
-        if not self.repository:
-            raise RuntimeError("Repository not available. Database connection is required.")
-        file_record = await self.repository.get_file_by_path(file_path)
-        if not file_record:
-            raise FileNotFoundError(f"File not found in database: {file_path}")
+        # Get current tags
+        if self.repository:
+            # Use database
+            file_record = await self.repository.get_file_by_path(file_path)
+            if not file_record:
+                raise FileNotFoundError(f"File not found in database: {file_path}")
+            
+            current_tags = file_record.tags
+            new_tags = set(current_tags).union(set(tags))
+            updated_tags = list(new_tags)
 
-        # Merge tags (avoid duplicates)
-        current_tags = file_record.tags
-        new_tags = set(current_tags).union(set(tags))
-        updated_tags = list(new_tags)
+            # Update database
+            from sqlalchemy import update
+            from src.database.schema import MemoryFileModel
 
-        # Update database
-        from sqlalchemy import update
-        from src.database.schema import MemoryFileModel
+            await self.repository.session.execute(
+                update(MemoryFileModel)
+                .where(MemoryFileModel.file_path == file_path)
+                .values(tags=updated_tags)
+            )
+            await self.repository.session.commit()
 
-        await self.repository.session.execute(
-            update(MemoryFileModel)
-            .where(MemoryFileModel.file_path == file_path)
-            .values(tags=updated_tags)
-        )
-        await self.repository.session.commit()
-
-        # Update JSON index
-        self.json_index_manager.add_or_update_file(
-            file_path=file_path,
-            title=file_record.title,
-            category=file_record.category.value,
-            description=file_record.title,
-            tags=updated_tags,
-            metadata=file_record.metadata,
-            word_count=file_record.word_count,
-            created_at=file_record.created_at,
-            updated_at=file_record.updated_at,
-        )
+            # Update JSON index
+            self.json_index_manager.add_or_update_file(
+                file_path=file_path,
+                title=file_record.title,
+                category=file_record.category.value,
+                description=file_record.title,
+                tags=updated_tags,
+                metadata=file_record.metadata,
+                word_count=file_record.word_count,
+                created_at=file_record.created_at,
+                updated_at=file_record.updated_at,
+            )
+        else:
+            # File-only mode - use JSON index
+            existing = self.json_index_manager.get_file(file_path)
+            if not existing:
+                raise FileNotFoundError(f"File not found: {file_path}")
+            
+            current_tags = existing.get("tags", [])
+            new_tags = set(current_tags).union(set(tags))
+            updated_tags = list(new_tags)
+            
+            # Update JSON index
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            created_at = existing.get("created_at", now)
+            
+            self.json_index_manager.add_or_update_file(
+                file_path=file_path,
+                title=existing.get("title", ""),
+                category=existing.get("category", ""),
+                description=existing.get("description", existing.get("title", "")),
+                tags=updated_tags,
+                metadata=existing.get("metadata", {}),
+                word_count=existing.get("word_count", 0),
+                created_at=datetime.fromisoformat(created_at) if isinstance(created_at, str) else created_at,
+                updated_at=now,
+            )
 
         logger.info("tags_added", file_path=file_path, tags=tags)
 
@@ -680,40 +830,64 @@ class MemoryTools:
         if not self.file_manager.file_exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Get current tags from database
-        if not self.repository:
-            raise RuntimeError("Repository not available. Database connection is required.")
-        file_record = await self.repository.get_file_by_path(file_path)
-        if not file_record:
-            raise FileNotFoundError(f"File not found in database: {file_path}")
+        # Get current tags
+        if self.repository:
+            # Use database
+            file_record = await self.repository.get_file_by_path(file_path)
+            if not file_record:
+                raise FileNotFoundError(f"File not found in database: {file_path}")
+            
+            current_tags = file_record.tags
+            updated_tags = list(set(current_tags).difference(set(tags)))
 
-        # Remove tags
-        current_tags = file_record.tags
-        updated_tags = list(set(current_tags).difference(set(tags)))
+            # Update database
+            from sqlalchemy import update
+            from src.database.schema import MemoryFileModel
 
-        # Update database
-        from sqlalchemy import update
-        from src.database.schema import MemoryFileModel
+            await self.repository.session.execute(
+                update(MemoryFileModel)
+                .where(MemoryFileModel.file_path == file_path)
+                .values(tags=updated_tags)
+            )
+            await self.repository.session.commit()
 
-        await self.repository.session.execute(
-            update(MemoryFileModel)
-            .where(MemoryFileModel.file_path == file_path)
-            .values(tags=updated_tags)
-        )
-        await self.repository.session.commit()
-
-        # Update JSON index
-        self.json_index_manager.add_or_update_file(
-            file_path=file_path,
-            title=file_record.title,
-            category=file_record.category.value,
-            description=file_record.title,
-            tags=updated_tags,
-            metadata=file_record.metadata,
-            word_count=file_record.word_count,
-            created_at=file_record.created_at,
-            updated_at=file_record.updated_at,
-        )
+            # Update JSON index
+            self.json_index_manager.add_or_update_file(
+                file_path=file_path,
+                title=file_record.title,
+                category=file_record.category.value,
+                description=file_record.title,
+                tags=updated_tags,
+                metadata=file_record.metadata,
+                word_count=file_record.word_count,
+                created_at=file_record.created_at,
+                updated_at=file_record.updated_at,
+            )
+        else:
+            # File-only mode - use JSON index
+            existing = self.json_index_manager.get_file(file_path)
+            if not existing:
+                raise FileNotFoundError(f"File not found: {file_path}")
+            
+            current_tags = existing.get("tags", [])
+            updated_tags = list(set(current_tags).difference(set(tags)))
+            
+            # Update JSON index
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            created_at = existing.get("created_at", now)
+            
+            self.json_index_manager.add_or_update_file(
+                file_path=file_path,
+                title=existing.get("title", ""),
+                category=existing.get("category", ""),
+                description=existing.get("description", existing.get("title", "")),
+                tags=updated_tags,
+                metadata=existing.get("metadata", {}),
+                word_count=existing.get("word_count", 0),
+                created_at=datetime.fromisoformat(created_at) if isinstance(created_at, str) else created_at,
+                updated_at=now,
+            )
 
         logger.info("tags_removed", file_path=file_path, tags=tags)
 
@@ -736,17 +910,29 @@ class MemoryTools:
         if not self.file_manager.file_exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        if not self.repository:
-            raise RuntimeError("Repository not available. Database connection is required.")
-        file_record = await self.repository.get_file_by_path(file_path)
-        if not file_record:
-            raise FileNotFoundError(f"File not found in database: {file_path}")
-
-        return {
-            "file_path": file_path,
-            "tags": file_record.tags,
-            "total": len(file_record.tags)
-        }
+        if self.repository:
+            # Use database
+            file_record = await self.repository.get_file_by_path(file_path)
+            if not file_record:
+                raise FileNotFoundError(f"File not found in database: {file_path}")
+            
+            return {
+                "file_path": file_path,
+                "tags": file_record.tags,
+                "total": len(file_record.tags)
+            }
+        else:
+            # File-only mode - use JSON index
+            existing = self.json_index_manager.get_file(file_path)
+            if not existing:
+                raise FileNotFoundError(f"File not found: {file_path}")
+            
+            tags = existing.get("tags", [])
+            return {
+                "file_path": file_path,
+                "tags": tags,
+                "total": len(tags)
+            }
 
     # =============================
     # Bulk Operations
@@ -1023,10 +1209,12 @@ class MemoryTools:
         if not self.file_manager.file_exists(old_file_path):
             raise FileNotFoundError(f"File not found: {old_file_path}")
 
-        # Get current file record for category
-        file_record = await self.repository.get_file_by_path(old_file_path)
-        if not file_record:
-            raise FileNotFoundError(f"File not found in database: {old_file_path}")
+        # Get current file record for category (if available)
+        file_record = None
+        if self.repository:
+            file_record = await self.repository.get_file_by_path(old_file_path)
+            if not file_record:
+                raise FileNotFoundError(f"File not found in database: {old_file_path}")
 
         # Generate new path from new title
         from pathlib import Path
@@ -1044,11 +1232,57 @@ class MemoryTools:
         # Delete old file
         self.file_manager.delete_file(old_file_path)
 
-        # Sync new file to database
-        await self.sync_service.sync_file(new_file_path, force=True)
+        # Update JSON index before syncing
+        from pathlib import Path
+        from datetime import datetime, timezone
+        file_path_obj = Path(new_file_path)
+        category = file_path_obj.parent.name
+        word_count = len(content.split())
+        now = datetime.now(timezone.utc)
+        
+        # Get old entry to preserve created_at and metadata
+        old_entry = self.json_index_manager.get_file(old_file_path)
+        created_at = old_entry.get("created_at", now) if old_entry else now
+        tags = old_entry.get("tags", []) if old_entry else []
+        metadata = old_entry.get("metadata", {}) if old_entry else {}
+        
+        if file_record:
+            # Use database record if available
+            self.json_index_manager.add_or_update_file(
+                file_path=new_file_path,
+                title=new_title,
+                category=file_record.category.value,
+                description=new_title,
+                tags=file_record.tags,
+                metadata=file_record.metadata,
+                word_count=file_record.word_count,
+                created_at=file_record.created_at,
+                updated_at=file_record.updated_at,
+            )
+        else:
+            # File-only mode
+            self.json_index_manager.add_or_update_file(
+                file_path=new_file_path,
+                title=new_title,
+                category=category,
+                description=new_title,
+                tags=tags,
+                metadata=metadata,
+                word_count=word_count,
+                created_at=datetime.fromisoformat(created_at) if isinstance(created_at, str) else created_at,
+                updated_at=now,
+            )
+        
+        # Remove old file from JSON index
+        self.json_index_manager.remove_file(old_file_path)
+        
+        # Sync new file to database if available
+        if self.sync_service:
+            await self.sync_service.sync_file(new_file_path, force=True)
 
-        # Delete old file from database
-        await self.repository.delete_file(file_record.id)
+        # Delete old file from database if available
+        if self.repository and file_record:
+            await self.repository.delete_file(file_record.id)
 
         logger.info("file_renamed", old_path=old_file_path, new_path=new_file_path)
 
@@ -1077,10 +1311,12 @@ class MemoryTools:
         if not self.file_manager.file_exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Get current file record
-        file_record = await self.repository.get_file_by_path(file_path)
-        if not file_record:
-            raise FileNotFoundError(f"File not found in database: {file_path}")
+        # Get current file record (if available)
+        file_record = None
+        if self.repository:
+            file_record = await self.repository.get_file_by_path(file_path)
+            if not file_record:
+                raise FileNotFoundError(f"File not found in database: {file_path}")
 
         # Generate new path
         from pathlib import Path
@@ -1097,19 +1333,64 @@ class MemoryTools:
         # Delete old file
         self.file_manager.delete_file(file_path)
 
-        # Sync new file to database
-        await self.sync_service.sync_file(new_file_path, force=True)
+        # Sync new file to database if available
+        if self.sync_service:
+            await self.sync_service.sync_file(new_file_path, force=True)
 
-        # Delete old file from database
-        await self.repository.delete_file(file_record.id)
+        # Delete old file from database if available
+        if self.repository and file_record:
+            await self.repository.delete_file(file_record.id)
 
         # Update main.md index
+        title = file_record.title if file_record else Path(new_file_path).stem.replace('_', ' ').title()
         self.index_manager.update_file_index(
             file_path=new_file_path,
-            description=file_record.title,
+            description=title,
             category=f"{new_category}s"
         )
-        await self.sync_service.sync_file("main.md", force=True)
+        if self.sync_service:
+            await self.sync_service.sync_file("main.md", force=True)
+        
+        # Update JSON index
+        if file_record:
+            # Use database record
+            self.json_index_manager.add_or_update_file(
+                file_path=new_file_path,
+                title=file_record.title,
+                category=f"{new_category}s",
+                description=file_record.title,
+                tags=file_record.tags,
+                metadata=file_record.metadata,
+                word_count=file_record.word_count,
+                created_at=file_record.created_at,
+                updated_at=file_record.updated_at,
+            )
+        else:
+            # File-only mode
+            from datetime import datetime, timezone
+            file_path_obj = Path(new_file_path)
+            title = file_path_obj.stem.replace('_', ' ').title()
+            word_count = len(content.split())
+            now = datetime.now(timezone.utc)
+            
+            # Get old entry to preserve created_at
+            old_entry = self.json_index_manager.get_file(file_path)
+            created_at = old_entry.get("created_at", now) if old_entry else now
+            
+            self.json_index_manager.add_or_update_file(
+                file_path=new_file_path,
+                title=title,
+                category=f"{new_category}s",
+                description=title,
+                tags=old_entry.get("tags", []) if old_entry else [],
+                metadata=old_entry.get("metadata", {}) if old_entry else {},
+                word_count=word_count,
+                created_at=datetime.fromisoformat(created_at) if isinstance(created_at, str) else created_at,
+                updated_at=now,
+            )
+        
+        # Remove old file from JSON index
+        self.json_index_manager.remove_file(file_path)
 
         logger.info("file_moved", old_path=file_path, new_path=new_file_path)
 
@@ -1140,10 +1421,21 @@ class MemoryTools:
         if not self.file_manager.file_exists(source_file_path):
             raise FileNotFoundError(f"File not found: {source_file_path}")
 
-        # Get source file record
-        file_record = await self.repository.get_file_by_path(source_file_path)
-        if not file_record:
-            raise FileNotFoundError(f"File not found in database: {source_file_path}")
+        # Get source file record (if available)
+        file_record = None
+        tags = []
+        metadata = {}
+        if self.repository:
+            file_record = await self.repository.get_file_by_path(source_file_path)
+            if file_record:
+                tags = file_record.tags
+                metadata = file_record.metadata
+        else:
+            # File-only mode - get from JSON index
+            existing = self.json_index_manager.get_file(source_file_path)
+            if existing:
+                tags = existing.get("tags", [])
+                metadata = existing.get("metadata", {})
 
         # Determine category
         if new_category is None:
@@ -1162,8 +1454,8 @@ class MemoryTools:
             title=new_title,
             category=category,
             content=content,
-            tags=file_record.tags,
-            metadata=file_record.metadata,
+            tags=tags,
+            metadata=metadata,
         )
 
         logger.info("file_copied", source=source_file_path, destination=result["file_path"])
@@ -1205,13 +1497,12 @@ class MemoryTools:
                 "files": []
             })
 
-        # Sync main.md to database (required)
-        if not self.sync_service:
-            raise RuntimeError("Sync service not available. Database connection is required.")
-        try:
-            await self.sync_service.sync_file("main.md", force=True)
-        except Exception as e:
-            logger.warning("failed_to_sync_main_to_db", error=str(e))
+        # Sync main.md to database if available
+        if self.sync_service:
+            try:
+                await self.sync_service.sync_file("main.md", force=True)
+            except Exception as e:
+                logger.warning("failed_to_sync_main_to_db", error=str(e))
 
         logger.info("memory_initialized", path=str(self.file_manager.memory_files_path))
 
@@ -1243,15 +1534,13 @@ class MemoryTools:
         errors = []
 
         # Delete files
-        if not self.repository:
-            raise RuntimeError("Repository not available. Database connection is required.")
-
         for file_path in files_to_delete:
             try:
-                # Delete from database
-                file_record = await self.repository.get_file_by_path(file_path)
-                if file_record:
-                    await self.repository.delete_file(file_record.id)
+                # Delete from database if available
+                if self.repository:
+                    file_record = await self.repository.get_file_by_path(file_path)
+                    if file_record:
+                        await self.repository.delete_file(file_record.id)
 
                 # Delete from filesystem
                 self.file_manager.delete_file(file_path)
@@ -1271,13 +1560,12 @@ class MemoryTools:
         from scripts.init_memory_structure import init_memory_structure
         init_memory_structure(self.file_manager.memory_files_path)
 
-        # Sync main.md (required)
-        if not self.sync_service:
-            raise RuntimeError("Sync service not available. Database connection is required.")
-        try:
-            await self.sync_service.sync_file("main.md", force=True)
-        except Exception as e:
-            logger.warning("failed_to_sync_main_after_reset", error=str(e))
+        # Sync main.md if available
+        if self.sync_service:
+            try:
+                await self.sync_service.sync_file("main.md", force=True)
+            except Exception as e:
+                logger.warning("failed_to_sync_main_after_reset", error=str(e))
 
         logger.info("memory_reset", deleted_count=deleted_count, errors=len(errors))
 

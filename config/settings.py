@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # ===================================
     # Database Configuration
     # ===================================
+    use_database: bool = Field(default=True, description="Enable database connection. If False, works in file-only mode without search")
     postgres_host: str = Field(default="localhost", description="PostgreSQL host")
     postgres_port: int = Field(default=5432, description="PostgreSQL port")
     postgres_db: str = Field(default="agent_memory", description="PostgreSQL database name")
