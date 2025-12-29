@@ -17,7 +17,7 @@ sys.path.insert(0, str(project_root))
 
 
 # OpenRouter API ключ
-OPENROUTER_API_KEY = "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"
+OPENROUTER_API_KEY = "sk-or-v1-........"
 
 
 async def test_langchain_agent_file_only_mode():
