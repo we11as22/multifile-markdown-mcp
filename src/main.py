@@ -1,7 +1,24 @@
 """Main entry point for Agent Memory MCP Server"""
 import asyncio
 import logging.config
+import os
+import sys
 from pathlib import Path
+
+# Fix for FastMCP compatibility with mcp package
+# FastMCP expects mcp.types as a module, but newer mcp versions have it as an attribute
+# We need to register it before FastMCP tries to import it
+# This MUST be done before any import of fastmcp
+try:
+    from mcp import types as mcp_types_module
+    # Register mcp.types as a module so FastMCP can import it
+    sys.modules['mcp.types'] = mcp_types_module
+    # Also add it as an attribute to mcp package
+    import mcp
+    if not hasattr(mcp, 'types'):
+        mcp.types = mcp_types_module
+except (ImportError, AttributeError):
+    pass
 
 import structlog
 from fastmcp import FastMCP
@@ -348,12 +365,12 @@ async def active_memory_usage() -> str:
 
 
 async def main() -> None:
-    """Main entry point"""
+    """Main entry point for stdio transport"""
     try:
         # Initialize server components
         await initialize_server()
 
-        # Run MCP server (stdio transport by default)
+        # Run MCP server (stdio transport)
         logger.info("starting_mcp_server", transport="stdio")
         async with mcp:
             # Server is now running
@@ -370,7 +387,25 @@ async def main() -> None:
 
 def cli_main() -> None:
     """CLI entry point for pip installation"""
-    asyncio.run(main())
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+    
+    if transport in ("http", "streamable-http", "sse"):
+        # For HTTP/SSE transport, FastMCP.run() is blocking and synchronous
+        # We need to initialize server components first, then run blocking server
+        port = int(os.getenv("MCP_PORT", "8000"))
+        
+        # Initialize server components asynchronously
+        asyncio.run(initialize_server())
+        
+        # Then run the blocking server
+        # FastMCP supports "sse" and "streamable-http" transports
+        # langchain-mcp-adapters supports both "http" and "sse" transports
+        # host="0.0.0.0" ensures server listens on all interfaces (needed for Docker)
+        logger.info("starting_mcp_server", transport=transport, port=port, host="0.0.0.0")
+        mcp.run(transport=transport, port=port, host="0.0.0.0")
+    else:
+        # For stdio transport, use async main
+        asyncio.run(main())
 
 
 if __name__ == "__main__":

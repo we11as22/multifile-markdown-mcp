@@ -1,0 +1,61 @@
+version: '3.8'
+
+# Docker Compose для тестирования удаленного MCP сервера
+# Использование: docker-compose -f docker-compose.remote-test.yml up -d
+# Сервер будет доступен на http://localhost:8000/mcp
+
+services:
+  # MCP Server (без БД, HTTP транспорт)
+  mcp-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: agent-memory-mcp-remote-test
+    environment:
+      # Server
+      - MCP_SERVER_NAME=${MCP_SERVER_NAME:-agent-memory}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Transport
+      - MCP_TRANSPORT=sse
+      - MCP_PORT=8000
+
+      # Storage
+      - MEMORY_FILES_PATH=/app/memory_files
+      - MAIN_FILE_NAME=${MAIN_FILE_NAME:-main.md}
+
+      # Database disabled
+      - USE_DATABASE=false
+
+      # Search is not available in file-only mode
+      # Embedding providers are not used
+    volumes:
+      # Mount memory files directory
+      - ../memory_files:/app/memory_files
+      # Mount logs directory
+      - mcp_logs:/app/logs
+    ports:
+      # Expose HTTP endpoint
+      - "8000:8000"
+    networks:
+      - agent-memory-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/mcp || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  # MCP server logs
+  mcp_logs:
+    driver: local
+
+networks:
+  agent-memory-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+

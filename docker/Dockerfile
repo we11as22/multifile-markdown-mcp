@@ -70,5 +70,7 @@ RUN echo '#!/bin/sh\npython -c "import sys; sys.exit(0)"' > /app/healthcheck.sh 
 # Expose port for potential HTTP transport
 EXPOSE 8000
 
-# Run MCP server via stdio transport
+# Run MCP server
+# For HTTP transport, use: MCP_TRANSPORT=http MCP_PORT=8000
+# For stdio transport (default), use without env vars
 CMD ["python", "-m", "src.main"]

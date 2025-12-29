@@ -148,6 +148,52 @@ docker-compose logs -f mcp-server
 - ✅ Операции с main.md работают
 - ❌ Поиск недоступен (требует БД)
 
+#### Удаленное тестирование (SSE транспорт)
+
+Для тестирования интеграции с LangChain агентами через удаленный MCP сервер:
+
+**1. Запуск сервера в Docker (в отдельном терминале):**
+```bash
+cd docker
+docker-compose -f docker-compose.remote-test.yml up -d
+```
+
+**2. Проверка работы сервера:**
+```bash
+# Проверить логи
+docker logs agent-memory-mcp-remote-test
+
+# Сервер будет доступен на http://localhost:8000/sse
+```
+
+**3. Остановка сервера:**
+```bash
+cd docker
+docker-compose -f docker-compose.remote-test.yml down
+```
+
+**Конфигурация транспорта:**
+- `MCP_TRANSPORT=sse` - Server-Sent Events (рекомендуется для удаленного доступа)
+- `MCP_TRANSPORT=http` - HTTP транспорт
+- `MCP_TRANSPORT=streamable-http` - Streamable HTTP
+- `MCP_PORT=8000` - Порт сервера (по умолчанию 8000)
+
+**Использование с langchain-mcp-adapters:**
+```python
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+client = MultiServerMCPClient(
+    {
+        "memory_service": {
+            "transport": "sse",
+            "url": "http://localhost:8000/sse",
+        }
+    }
+)
+
+tools = await client.get_tools()
+```
+
 ## Usage
 
 ### As Python Library
@@ -770,6 +816,51 @@ pytest tests/ -v
 pytest tests/test_library.py -v
 ```
 
+### File-Only Mode Testing
+
+```bash
+# Test file-only mode (no database required)
+python tests/test_file_only_mode.py
+```
+
+### Docker File-Only Mode Testing
+
+```bash
+# Start Docker container in file-only mode
+cd docker
+docker-compose -f docker-compose.file-only.yml up -d
+
+# Run test
+python tests/test_docker_file_only.py
+```
+
+### Remote MCP Integration Testing (SSE)
+
+**Тестирование интеграции с LangChain через удаленный MCP сервер:**
+
+1. **Запустите Docker контейнер (в отдельном терминале):**
+```bash
+cd docker
+docker-compose -f docker-compose.remote-test.yml up -d
+```
+
+2. **Запустите тест (в другом терминале):**
+```bash
+python tests/test_remote_mcp_langchain.py
+```
+
+3. **Остановите Docker контейнер:**
+```bash
+cd docker
+docker-compose -f docker-compose.remote-test.yml down
+```
+
+Тест проверяет:
+- ✅ Подключение к MCP серверу через SSE
+- ✅ Получение всех 9 инструментов
+- ✅ Вызов инструментов (help, list)
+- ✅ Создание LangChain агента с инструментами из MCP
+
 ### Manual Testing Script
 
 ```bash
@@ -812,15 +903,34 @@ src/
 pip install -e ".[dev]"
 ```
 
-2. Start PostgreSQL:
+2. Start PostgreSQL (если нужна БД):
 ```bash
 cd docker
 docker-compose up -d postgres
 ```
 
 3. Run MCP server:
+
+**Stdio транспорт (по умолчанию):**
 ```bash
 python -m src.main
+```
+
+**HTTP/SSE транспорт (для удаленного доступа):**
+```bash
+# SSE транспорт (рекомендуется)
+MCP_TRANSPORT=sse MCP_PORT=8000 python -m src.main
+
+# HTTP транспорт
+MCP_TRANSPORT=http MCP_PORT=8000 python -m src.main
+
+# Streamable HTTP
+MCP_TRANSPORT=streamable-http MCP_PORT=8000 python -m src.main
+```
+
+**File-only mode (без БД):**
+```bash
+USE_DATABASE=false MCP_TRANSPORT=sse MCP_PORT=8000 python -m src.main
 ```
 
 4. Or use as library:
@@ -830,6 +940,30 @@ from agent_memory_mcp import MemoryLibrary
 memory = MemoryLibrary(...)
 await memory.initialize()
 ```
+
+### MCP Transport Options
+
+Сервер поддерживает несколько транспортов:
+
+- **`stdio`** (по умолчанию) - Стандартный ввод/вывод, используется для локальной интеграции с MCP клиентами
+- **`sse`** - Server-Sent Events, рекомендуется для удаленного доступа через HTTP
+- **`http`** - HTTP транспорт
+- **`streamable-http`** - Streamable HTTP транспорт
+
+**Настройка транспорта:**
+```bash
+# Через переменную окружения
+export MCP_TRANSPORT=sse
+export MCP_PORT=8000
+
+# Или при запуске
+MCP_TRANSPORT=sse MCP_PORT=8000 python -m src.main
+```
+
+**SSE транспорт:**
+- URL: `http://localhost:8000/sse`
+- Поддерживается `langchain-mcp-adapters`
+- Идеален для удаленного доступа
 
 ## Performance
 
